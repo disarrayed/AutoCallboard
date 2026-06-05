@@ -97,8 +97,6 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 
 ---
 
-## Credits
-
-Built for the Project Ebonhold community.
-
-Feature direction, testing, and debug feedback from Disarray.
+<div align="center">
+<sub>Made with ❤️ and 🤖 for the Project Ebonhold community. Fork it. Rebrand it. I don't care.</sub>
+</div>
