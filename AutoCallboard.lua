@@ -1096,11 +1096,7 @@ function AutoCallboardRuntime.CheckPendingSummonAttempt()
   AppendDebugLog("summon", "summon attempt was not verified source=" .. tostring(source))
 
   if rolling then
-    if source == "start button" and StopRolling then
-      StopRolling("Start failed: Callboard did not open. Try Start again.")
-    else
-      SetRollPause("no_callboard", "Paused: summon did not start. Click Callboard or try Start again.")
-    end
+    SetRollPause("no_callboard", "Paused: waiting for Callboard. Rolling will resume when it opens.")
   end
 
   UpdateSummonStatus()
