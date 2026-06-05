@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: AutoCallboard
+## Notes: Automates Callboard rolling and selection for wanted quests.
+## Author: Disarray
+## Version: 1.0
+## SavedVariables: AutoCallboardDB, AutoCallboardDebugLog
+
+AutoCallboardCore.lua
+AutoCallboardLegacy.lua
+AutoCallboard.lua
