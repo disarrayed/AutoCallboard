@@ -19,6 +19,7 @@ local DEFAULTS = {
     debug = {
         enabled = false,
         mouseWatch = false,
+        sniffer = false,
         maxLog = 120,
     },
     buttonShown = true,
@@ -62,6 +63,7 @@ local function copyDefaults()
         debug = {
             enabled = DEFAULTS.debug.enabled,
             mouseWatch = DEFAULTS.debug.mouseWatch,
+            sniffer = DEFAULTS.debug.sniffer,
             maxLog = DEFAULTS.debug.maxLog,
         },
         buttonShown = DEFAULTS.buttonShown,
@@ -156,6 +158,10 @@ function Core.mergeState(saved)
 
         if type(saved.debug.mouseWatch) == "boolean" then
             state.debug.mouseWatch = saved.debug.mouseWatch
+        end
+
+        if type(saved.debug.sniffer) == "boolean" then
+            state.debug.sniffer = saved.debug.sniffer
         end
 
         if type(saved.debug.maxLog) == "number" and saved.debug.maxLog >= 20 then
@@ -375,6 +381,32 @@ function Core.parseSlash(input)
         end
 
         return { kind = "invalid", message = "Usage: /acb watch on, or /acb watch off" }
+    end
+
+    if command == "sniff" or command == "sniffer" then
+        local lowered = rest:lower()
+
+        if rest == "" or lowered == "dump" then
+            return { kind = "debug", action = "sniffDump" }
+        end
+
+        if lowered == "on" or lowered == "true" or lowered == "yes" then
+            return { kind = "debug", action = "sniffer", value = true }
+        end
+
+        if lowered == "off" or lowered == "false" or lowered == "no" then
+            return { kind = "debug", action = "sniffer", value = false }
+        end
+
+        if lowered == "clear" then
+            return { kind = "debug", action = "sniffClear" }
+        end
+
+        return { kind = "invalid", message = "Usage: /acb sniff on, /acb sniff off, /acb sniff, or /acb sniff clear" }
+    end
+
+    if command == "etrace" or command == "eventtrace" then
+        return { kind = "debug", action = "etrace" }
     end
 
     if command == "inspect" then

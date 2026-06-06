@@ -46,7 +46,6 @@ local pendingRerollUntil
 local lastObjectiveSignature
 local selectedQuest
 local nextSelectedQuestCheckAt
-local nextSummonAttemptAt
 local lastCapturedSignature
 local nextQuestRefreshAt
 local nextQuestWatchAt
@@ -57,10 +56,14 @@ local nextSummonCastAt
 local preClickCooldownRemaining = 0
 local preClickWasActive = false
 local preClickWasUsable = true
+local preClickTargetedBoardName
 local summonStatusText
+local ShowDebugWindow
 
 local INTERACT_DELAY = 1.25
 local ACCEPT_WINDOW = 12
+local ACCEPTED_QUEST_SHARE_TIMEOUT = 8
+local ACCEPTED_QUEST_SHARE_RETRY_INTERVAL = 0.35
 local DEBUG_PROBE_INTERVAL = 0.25
 local KNOWN_ROWS = 10
 local QUEST_ROW_HEIGHT = 28
@@ -70,8 +73,10 @@ local KNOWN_QUEST_ROW_WIDTH = 556
 local QUEST_REFRESH_INTERVAL = 0.4
 local QUEST_WATCH_INTERVAL = 0.5
 local ROLL_EVAL_INTERVAL = 0.5
+local BOARD_TARGET_PRIMARY_NAMES = { "Objectives Board", "Objective Board" }
+local BOARD_OBJECT_IDS = { [600600] = true }
 
-AutoCallboardRuntime.controlCollapsedWidth = 240
+AutoCallboardRuntime.controlCollapsedWidth = 300
 AutoCallboardRuntime.controlCollapsedHeight = 84
 AutoCallboardRuntime.controlExpandedWidth = 640
 AutoCallboardRuntime.controlExpandedHeight = 684
@@ -110,6 +115,14 @@ local THEME = {
   good = { RGB(209, 246, 246, 1) },
   heading = { RGB(176, 72, 248, 1) },
 }
+
+local function GetAddonVersion()
+  if GetAddOnMetadata and ADDON_NAME then
+    return GetAddOnMetadata(ADDON_NAME, "Version") or "unknown"
+  end
+
+  return "unknown"
+end
 
 local function ApplyColor(target, methodName, color)
   if target and target[methodName] and color then
@@ -619,6 +632,8 @@ end
 
 local UpdateRollToggleButtons
 local StopRolling
+local TargetCallboard
+local ClearRollPause
 
 function AutoCallboardRuntime.GetSummonMacroText()
   if state and state.summonSpell and state.summonSpell ~= "" then
@@ -781,26 +796,33 @@ local function GetHelpText()
   local lines = {
     "1. Click " .. HelpName("Quests") .. " first.",
     "   Check the quests you want AutoCallboard to pick while it rolls.",
+    "   AutoCallboard appears purple in the addon list.",
     "",
     "2. If your quest list is short, give it time.",
     "   AutoCallboard learns quests as they show up on the Callboard.",
     "",
     "3. Click " .. HelpName("Start") .. " when you are ready.",
-    "   It opens the " .. HelpName("Callboard") .. ", rolls, and looks for your checked quests.",
+    "   Start never summons. It waits for board UI/data, then rolls.",
     "",
-    "4. When a checked quest shows up, it stops.",
+    "4. Use " .. HelpName("Callboard") .. " when you need to summon a board.",
+    "   At a normal Objectives Board, click the board so AutoCallboard can see it.",
+    "",
+    "5. When a checked quest shows up, it stops.",
     "   AutoCallboard selects that quest and waits. Finish the quest, then it can keep going.",
     "",
-    "5. Click " .. HelpName("Stop") .. " any time you want to quit rolling.",
+    "6. Click " .. HelpName("Stop") .. " any time you want to quit rolling.",
     "",
-    "6. Be careful with gold.",
+    "7. Be careful with gold.",
     "   Rerolling costs gold. If you pick rare quests, it can roll many times and the cost can add up fast.",
     "",
     "Helpful buttons:",
-    "- " .. HelpName("Callboard") .. ": casts Summon Callboard.",
+    "- " .. HelpName("Callboard") .. ": summons the Callboard. If an Objectives Board is nearby, it opens that first.",
+    "- " .. HelpName("Start") .. ": starts or stops rolling after board access is ready.",
     "- " .. HelpName("Search") .. ": finds quests by name or quest info.",
     "- " .. HelpName("Select") .. ": takes one of the three current Callboard quests.",
     "- " .. HelpName("Export") .. " / " .. HelpName("Import") .. ": moves known quest data to another character.",
+    "- " .. HelpName("/acb sniff on") .. ": records board interaction evidence in the debug window.",
+    "- " .. HelpName("/acb etrace") .. ": opens the client event trace when it is available.",
   }
 
   return table.concat(lines, "\n")
@@ -876,6 +898,14 @@ local GetFallbackCooldownRemaining
 
 local function IsCallboardActive()
   if SecondsRemaining(callboardActiveUntil) > 0 then
+    return true
+  end
+
+  if SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil) > 0 then
+    return true
+  end
+
+  if AutoCallboardRuntime.GetNpcBoardInfo and AutoCallboardRuntime.GetNpcBoardInfo() then
     return true
   end
 
@@ -1194,17 +1224,17 @@ function AutoCallboardRuntime.IsCallboardUiPresent()
     return false
   end
 
-  if AutoCallboardRuntime.AnyFrameInChainVisible(_G.ObjectivesMainFrame, 1) then
+  if AutoCallboardRuntime.FrameIsVisibleOrShown(_G.ObjectivesMainFrame) then
     return true
   end
 
   for i = 1, 3 do
-    if AutoCallboardRuntime.AnyFrameInChainVisible(_G[state.objectivePrefix .. tostring(i)], 4) then
+    if AutoCallboardRuntime.FrameIsVisibleOrShown(_G[state.objectivePrefix .. tostring(i)]) then
       return true
     end
   end
 
-  return AutoCallboardRuntime.AnyFrameInChainVisible(ResolveFramePath(state.rerollFrame), 5)
+  return AutoCallboardRuntime.FrameIsVisibleOrShown(ResolveFramePath(state.rerollFrame))
 end
 
 function AutoCallboardRuntime.HasCurrentObjectiveData()
@@ -1212,11 +1242,293 @@ function AutoCallboardRuntime.HasCurrentObjectiveData()
 end
 
 function AutoCallboardRuntime.IsCallboardDataAvailable()
-  return AutoCallboardRuntime.IsCallboardUiPresent() or (SecondsRemaining(callboardActiveUntil) > 0 and AutoCallboardRuntime.HasCurrentObjectiveData())
+  if AutoCallboardRuntime.IsCallboardUiPresent() then
+    return true
+  end
+
+  if AutoCallboardRuntime.GetNpcBoardInfo
+      and AutoCallboardRuntime.GetNpcBoardInfo()
+      and AutoCallboardRuntime.HasCurrentObjectiveData() then
+    return true
+  end
+
+  return AutoCallboardRuntime.objectiveBoardAccessOpen
+      and SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil) > 0
+      and AutoCallboardRuntime.HasCurrentObjectiveData()
 end
 
 function AutoCallboardRuntime.IsCallboardReadyForQuestActions()
-  return IsCallboardActive() and AutoCallboardRuntime.IsCallboardDataAvailable()
+  return AutoCallboardRuntime.GetBoardAccessState("quest actions").ok
+end
+
+function AutoCallboardRuntime.GetBoardAccessState(action)
+  local service = GetObjectivesService()
+  local uiOpen = AutoCallboardRuntime.IsCallboardUiPresent()
+  local sessionOpen = AutoCallboardRuntime.objectiveBoardAccessOpen
+      and SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil) > 0
+  local npcBoard = AutoCallboardRuntime.GetNpcBoardInfo and AutoCallboardRuntime.GetNpcBoardInfo() or nil
+  local dataReady = AutoCallboardRuntime.HasCurrentObjectiveData()
+  local activeRemaining = SecondsRemaining(callboardActiveUntil)
+
+  if not service then
+    return {
+      ok = false,
+      reason = "objectives_service_missing",
+      message = "Project Ebonhold objective service is not loaded.",
+    }
+  end
+
+  if uiOpen or sessionOpen or npcBoard then
+    if dataReady then
+      return {
+        ok = true,
+        boardOpen = true,
+        source = uiOpen and "objectives_ui" or npcBoard and "npc_token" or "objectives_gossip",
+        reason = "ready",
+        message = "Board is open.",
+        boardName = npcBoard and npcBoard.name or nil,
+        boardObjectId = npcBoard and npcBoard.objectId or nil,
+      }
+    end
+
+    return {
+      ok = false,
+      boardOpen = true,
+      needsData = true,
+      source = uiOpen and "objectives_ui" or npcBoard and "npc_token" or "objectives_gossip",
+      reason = "objective_data_missing",
+      message = "Board is open, but objective data is not ready yet.",
+      boardName = npcBoard and npcBoard.name or nil,
+      boardObjectId = npcBoard and npcBoard.objectId or nil,
+    }
+  end
+
+  if activeRemaining > 0 then
+    return {
+      ok = false,
+      callboardActive = true,
+      reason = "board_window_not_open",
+      message = "Callboard is active, but the board window is not open. Click the board.",
+    }
+  end
+
+  return {
+    ok = false,
+    reason = "board_not_open",
+    message = "Paused: click the Objectives Board, or use Callboard.",
+    action = action,
+  }
+end
+
+function AutoCallboardRuntime.RequestObjectiveBoardData(source)
+  local now = GetTime()
+
+  if AutoCallboardRuntime.HasCurrentObjectiveData() then
+    AutoCallboardRuntime.objectiveRequestPendingUntil = nil
+    AutoCallboardRuntime.objectiveRequestAttempts = 0
+    return true
+  end
+
+  if AutoCallboardRuntime.objectiveRequestPendingUntil and now < AutoCallboardRuntime.objectiveRequestPendingUntil then
+    return true
+  end
+
+  if AutoCallboardRuntime.nextObjectiveRequestAt and now < AutoCallboardRuntime.nextObjectiveRequestAt then
+    return true
+  end
+
+  if AutoCallboardRuntime.objectiveRequestAttempts and AutoCallboardRuntime.objectiveRequestAttempts >= 2 then
+    return false
+  end
+
+  local service = GetObjectivesService()
+  if not service or not service.RequestObjectives then
+    return false
+  end
+
+  AutoCallboardRuntime.objectiveRequestAttempts = (AutoCallboardRuntime.objectiveRequestAttempts or 0) + 1
+  AutoCallboardRuntime.objectiveRequestPendingUntil = now + 2.5
+  AutoCallboardRuntime.nextObjectiveRequestAt = now + 3
+  service.RequestObjectives()
+  AppendDebugLog("summon", "requested Objectives Board data source=" .. tostring(source) .. " attempt=" .. tostring(AutoCallboardRuntime.objectiveRequestAttempts))
+
+  return true
+end
+
+function AutoCallboardRuntime.CleanBoardText(value)
+  if type(value) ~= "string" then
+    return ""
+  end
+
+  value = value:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+  value = value:gsub("^%s+", ""):gsub("%s+$", "")
+
+  return value
+end
+
+function AutoCallboardRuntime.IsObjectiveBoardName(value)
+  value = AutoCallboardRuntime.CleanBoardText(value)
+
+  for i = 1, table.getn(BOARD_TARGET_PRIMARY_NAMES) do
+    if value == BOARD_TARGET_PRIMARY_NAMES[i] then
+      return true, value
+    end
+  end
+
+  return false, value
+end
+
+function AutoCallboardRuntime.IsObjectiveBoardGossipName(npcName)
+  return AutoCallboardRuntime.IsObjectiveBoardName(npcName)
+end
+
+function AutoCallboardRuntime.ExtractBoardObjectIdFromGuid(guid)
+  if type(guid) ~= "string" then
+    return nil
+  end
+
+  local hex = guid:gsub("^0x", "")
+  if string.len(hex) < 10 then
+    return nil
+  end
+
+  local prefix = string.sub(hex, 1, 4)
+  if prefix ~= "F110" and prefix ~= "F130" then
+    return nil
+  end
+
+  return tonumber(string.sub(hex, 5, 10), 16)
+end
+
+function AutoCallboardRuntime.IsKnownBoardObjectId(objectId)
+  return objectId and BOARD_OBJECT_IDS[tonumber(objectId)] == true
+end
+
+function AutoCallboardRuntime.IsBoardNpcName(value)
+  local isObjectiveName, cleanName = AutoCallboardRuntime.IsObjectiveBoardName(value)
+  if isObjectiveName then
+    return true, cleanName
+  end
+
+  if state and cleanName == state.targetName then
+    return true, cleanName
+  end
+
+  return false, cleanName
+end
+
+function AutoCallboardRuntime.IsGossipFrameOpen()
+  return GossipFrame and GossipFrame.IsShown and GossipFrame:IsShown()
+end
+
+function AutoCallboardRuntime.GetNpcBoardInfo()
+  if not AutoCallboardRuntime.IsGossipFrameOpen() then
+    return nil
+  end
+
+  local name = UnitName and AutoCallboardRuntime.CleanBoardText(UnitName("npc")) or ""
+  local guid = UnitGUID and UnitGUID("npc") or nil
+  local objectId = AutoCallboardRuntime.ExtractBoardObjectIdFromGuid(guid)
+  local nameMatches, cleanName = AutoCallboardRuntime.IsBoardNpcName(name)
+  local idMatches = AutoCallboardRuntime.IsKnownBoardObjectId(objectId)
+
+  if not nameMatches and not idMatches then
+    return nil
+  end
+
+  return {
+    name = cleanName,
+    guid = guid,
+    objectId = objectId,
+    nameMatches = nameMatches,
+    idMatches = idMatches,
+  }
+end
+
+function AutoCallboardRuntime.GetTooltipLineText(index)
+  local line = _G["GameTooltipTextLeft" .. tostring(index)]
+
+  if line and line.GetText then
+    return line:GetText()
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.GetWorldTooltipBoardName()
+  if not GameTooltip or not GameTooltip.IsShown or not GameTooltip:IsShown() then
+    return nil
+  end
+
+  local focus = GetMouseFocus and GetMouseFocus() or nil
+  local worldTooltip = WorldFrame and focus == WorldFrame
+
+  if not worldTooltip and GameTooltip.IsOwned and WorldFrame and GameTooltip:IsOwned(WorldFrame) then
+    worldTooltip = true
+  end
+
+  if not worldTooltip then
+    return nil
+  end
+
+  for i = 1, 4 do
+    local isBoard, boardName = AutoCallboardRuntime.IsObjectiveBoardName(AutoCallboardRuntime.GetTooltipLineText(i))
+
+    if isBoard then
+      return boardName
+    end
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.MarkObjectiveBoardAccess(source, boardName, duration)
+  local accessDuration = tonumber(duration) or (state and state.summonDuration or 30)
+  AutoCallboardRuntime.objectiveBoardReadyUntil = GetTime() + accessDuration
+  AutoCallboardRuntime.objectiveBoardAccessOpen = true
+  AutoCallboardRuntime.manualBoardOpenRequired = false
+  AppendDebugLog("guard", "board access source=" .. tostring(source) .. " name=" .. tostring(boardName) .. " duration=" .. tostring(accessDuration))
+end
+
+function AutoCallboardRuntime.DetectBoardAccess(source)
+  if IsCallboardActive() then
+    return true
+  end
+
+  local targeted, targetName = TargetCallboard()
+  if targeted then
+    AutoCallboardRuntime.MarkObjectiveBoardAccess(source, targetName)
+    return true
+  end
+
+  return false
+end
+
+function AutoCallboardRuntime.MarkObjectiveBoardOpened(source)
+  AutoCallboardRuntime.objectiveBoardReadyUntil = GetTime() + (state and state.summonDuration or 30)
+  AutoCallboardRuntime.objectiveBoardAccessOpen = true
+  AutoCallboardRuntime.manualBoardOpenRequired = false
+  AutoCallboardRuntime.RequestObjectiveBoardData(source)
+  AppendDebugLog("guard", "board opened source=" .. tostring(source))
+
+  if rolling and (rollPausedReason == "manual_board" or rollPausedReason == "no_callboard") then
+    ClearRollPause()
+    nextRollAt = GetTime() + 0.2
+  end
+end
+
+function AutoCallboardRuntime.MarkObjectiveBoardClosed(source)
+  if not AutoCallboardRuntime.objectiveBoardAccessOpen then
+    return
+  end
+
+  AutoCallboardRuntime.objectiveBoardAccessOpen = false
+  AutoCallboardRuntime.objectiveBoardReadyUntil = nil
+  AppendDebugLog("guard", "board closed source=" .. tostring(source))
+
+  if rolling and rollPausedReason ~= "quest_selected" and not IsCallboardActive() then
+    AutoCallboardRuntime.SetManualBoardOpenRequired(source)
+  end
 end
 
 local function ObjectiveSignature(objectives)
@@ -1286,31 +1598,16 @@ local function SetQuestStatus(message)
 end
 
 local function RequireActiveCallboard(action)
-  if IsCallboardActive() then
-    if AutoCallboardRuntime.IsCallboardDataAvailable() then
-      return true
-    end
+  local access = AutoCallboardRuntime.GetBoardAccessState(action)
 
-    local message = "Callboard is active, but live quest data is not available. Open the Callboard before " .. action .. "."
-    SetQuestStatus(message)
-    Print(message)
-    AppendDebugLog("guard", "blocked " .. tostring(action) .. " active=true ui=false")
-
-    return false
+  if access.ok then
+    return true
   end
 
-  local cooldownRemaining = GetSummonCooldownRemaining()
-  local message
-
-  if cooldownRemaining > 0 then
-    message = "Callboard is not active. Wait " .. FormatSeconds(cooldownRemaining) .. " for cooldown, then summon it before " .. action .. "."
-  else
-    message = "Callboard is not active. Summon it before " .. action .. "."
-  end
-
+  local message = access.message or "Board is not ready for " .. tostring(action) .. "."
   SetQuestStatus(message)
   Print(message)
-  AppendDebugLog("guard", "blocked " .. tostring(action) .. " active=false cooldown=" .. tostring(cooldownRemaining))
+  AppendDebugLog("guard", "blocked " .. tostring(action) .. " reason=" .. tostring(access.reason) .. " source=" .. tostring(access.source or "none"))
 
   return false
 end
@@ -1333,7 +1630,7 @@ SetRollPause = function(reason, message)
   AppendDebugLog("roll", "paused reason=" .. tostring(reason))
 end
 
-local function ClearRollPause(reason)
+ClearRollPause = function(reason)
   if reason and rollPausedReason ~= reason then
     return
   end
@@ -1344,6 +1641,17 @@ local function ClearRollPause(reason)
 
   rollPausedReason = nil
   rollPauseMessage = nil
+end
+
+AutoCallboardRuntime.SetManualBoardOpenRequired = function(source)
+  AutoCallboardRuntime.manualBoardOpenRequired = true
+  AutoCallboardRuntime.objectiveRequestPendingUntil = nil
+  AutoCallboardRuntime.nextObjectiveRequestAt = nil
+  pendingInteractAt = nil
+  AutoCallboardRuntime.pendingInteractSource = nil
+  pendingAcceptUntil = nil
+  SetRollPause("manual_board", "Paused: click the Objectives Board, or use Callboard.")
+  AppendDebugLog("guard", "board required before rolling source=" .. tostring(source))
 end
 
 local function StartSelectedQuestPause(quest, index)
@@ -1372,7 +1680,41 @@ local function NormalizeQuestTitle(title)
   return title
 end
 
+function AutoCallboardRuntime.GetQuestLogEntryInfo(index)
+  if not GetQuestLogTitle then
+    return nil
+  end
+
+  local title, _, _, fourth, fifth, sixth, seventh, eighth, ninth = GetQuestLogTitle(index)
+  if not title then
+    return nil
+  end
+
+  local wrathQuestID = tonumber(ninth)
+  if wrathQuestID and wrathQuestID > 0 then
+    return {
+      title = title,
+      isHeader = fifth,
+      isComplete = seventh,
+      questID = wrathQuestID,
+    }
+  end
+
+  local questID = tonumber(eighth)
+  return {
+    title = title,
+    isHeader = fourth,
+    isComplete = sixth,
+    questID = questID,
+  }
+end
+
 local function GetQuestIdFromLogIndex(index)
+  local entry = AutoCallboardRuntime.GetQuestLogEntryInfo(index)
+  if entry and tonumber(entry.questID) and tonumber(entry.questID) > 0 then
+    return tonumber(entry.questID)
+  end
+
   if GetQuestLogQuestID then
     local questID = GetQuestLogQuestID(index)
     if tonumber(questID) and tonumber(questID) > 0 then
@@ -1401,20 +1743,214 @@ local function FindSelectedQuestInLog()
   local entries = GetNumQuestLogEntries()
 
   for i = 1, entries do
-    local title, _, _, isHeader, _, isComplete = GetQuestLogTitle(i)
+    local entry = AutoCallboardRuntime.GetQuestLogEntryInfo(i)
 
-    if not isHeader then
-      local questID = GetQuestIdFromLogIndex(i)
+    if entry and not entry.isHeader then
+      local questID = tonumber(entry.questID) or GetQuestIdFromLogIndex(i)
       local idMatches = selectedID > 0 and questID == selectedID
-      local titleMatches = selectedTitle ~= "" and NormalizeQuestTitle(title) == selectedTitle
+      local titleMatches = selectedTitle ~= "" and NormalizeQuestTitle(entry.title) == selectedTitle
 
       if idMatches or titleMatches then
-        return true, isComplete == true or isComplete == 1
+        return true, entry.isComplete == true or entry.isComplete == 1
       end
     end
   end
 
   return false, false
+end
+
+function AutoCallboardRuntime.FindQuestLogIndexByID(questID, preferredIndex)
+  questID = tonumber(questID) or 0
+  if questID <= 0 or not GetNumQuestLogEntries then
+    return nil
+  end
+
+  if preferredIndex then
+    local preferredEntry = AutoCallboardRuntime.GetQuestLogEntryInfo(preferredIndex)
+    if preferredEntry and not preferredEntry.isHeader and tonumber(preferredEntry.questID) == questID then
+      return preferredIndex, preferredEntry
+    end
+  end
+
+  for i = 1, GetNumQuestLogEntries() do
+    local entry = AutoCallboardRuntime.GetQuestLogEntryInfo(i)
+    if entry and not entry.isHeader and tonumber(entry.questID) == questID then
+      return i, entry
+    end
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.QuestShareLabel(quest)
+  if not quest then
+    return "quest"
+  end
+
+  local questID = tonumber(quest.questID) or tonumber(quest.questId) or 0
+  local title = tostring(quest.title or "")
+  if title ~= "" and questID > 0 then
+    return tostring(questID) .. " " .. title
+  end
+
+  if questID > 0 then
+    return tostring(questID)
+  end
+
+  if title ~= "" then
+    return title
+  end
+
+  return "quest"
+end
+
+function AutoCallboardRuntime.ShareQuestLogIndex(index, quest, source)
+  if not index or not SelectQuestLogEntry then
+    AppendDebugLog("quest", "share blocked source=" .. tostring(source) .. " reason=missing SelectQuestLogEntry")
+    return false, "Quest log selection is not available."
+  end
+
+  if not QuestLogPushQuest then
+    AppendDebugLog("quest", "share blocked source=" .. tostring(source) .. " reason=missing QuestLogPushQuest")
+    return false, "Quest sharing is not available."
+  end
+
+  local previousIndex = GetQuestLogSelection and GetQuestLogSelection() or nil
+  SelectQuestLogEntry(index)
+
+  if GetQuestLogPushable and not GetQuestLogPushable() then
+    if previousIndex then
+      SelectQuestLogEntry(previousIndex)
+    end
+
+    AppendDebugLog("quest", "share skipped source=" .. tostring(source) .. " quest=" .. AutoCallboardRuntime.QuestShareLabel(quest) .. " reason=not pushable")
+    return false, "Quest is not shareable: " .. AutoCallboardRuntime.QuestShareLabel(quest)
+  end
+
+  QuestLogPushQuest()
+
+  if previousIndex then
+    SelectQuestLogEntry(previousIndex)
+  end
+
+  AppendDebugLog("quest", "shared source=" .. tostring(source) .. " quest=" .. AutoCallboardRuntime.QuestShareLabel(quest) .. " index=" .. tostring(index))
+  return true
+end
+
+function AutoCallboardRuntime.ShareAcceptedQuest(source, silent)
+  if not AutoCallboardRuntime.lastAcceptedQuest then
+    if not silent then
+      Print("No accepted quest recorded yet.")
+    end
+    AppendDebugLog("quest", "share skipped source=" .. tostring(source) .. " reason=no accepted quest")
+    return false
+  end
+
+  local lastAcceptedQuest = AutoCallboardRuntime.lastAcceptedQuest
+  local index, entry = AutoCallboardRuntime.FindQuestLogIndexByID(lastAcceptedQuest.questID, lastAcceptedQuest.questLogIndex)
+  if entry and entry.title and entry.title ~= "" then
+    lastAcceptedQuest.title = entry.title
+  end
+
+  if not index then
+    if not silent then
+      Print("Accepted quest is not in the quest log yet: " .. AutoCallboardRuntime.QuestShareLabel(lastAcceptedQuest))
+    end
+    AppendDebugLog("quest", "share pending source=" .. tostring(source) .. " quest=" .. AutoCallboardRuntime.QuestShareLabel(lastAcceptedQuest))
+    return false, "pending"
+  end
+
+  local shared, message = AutoCallboardRuntime.ShareQuestLogIndex(index, {
+      questID = lastAcceptedQuest.questID,
+      title = lastAcceptedQuest.title,
+    }, source)
+
+  if shared then
+    SetQuestStatus("Shared accepted quest: " .. AutoCallboardRuntime.QuestShareLabel(lastAcceptedQuest))
+    if not silent then
+      Print("Shared accepted quest: " .. AutoCallboardRuntime.QuestShareLabel(lastAcceptedQuest))
+    end
+  elseif message and not silent then
+    Print(message)
+  end
+
+  return shared, message
+end
+
+function AutoCallboardRuntime.ProcessPendingAcceptedQuestShare(source)
+  local pendingAcceptedQuestShare = AutoCallboardRuntime.pendingAcceptedQuestShare
+  if not pendingAcceptedQuestShare then
+    return
+  end
+
+  local now = GetTime()
+  if pendingAcceptedQuestShare.nextAttemptAt and now < pendingAcceptedQuestShare.nextAttemptAt then
+    return
+  end
+
+  if pendingAcceptedQuestShare.expiresAt and now > pendingAcceptedQuestShare.expiresAt then
+    AppendDebugLog("quest", "share expired source=" .. tostring(source) .. " quest=" .. AutoCallboardRuntime.QuestShareLabel(pendingAcceptedQuestShare))
+    AutoCallboardRuntime.pendingAcceptedQuestShare = nil
+    return
+  end
+
+  pendingAcceptedQuestShare.nextAttemptAt = now + ACCEPTED_QUEST_SHARE_RETRY_INTERVAL
+  local shared, message = AutoCallboardRuntime.ShareAcceptedQuest(source, true)
+
+  if shared or message ~= "pending" then
+    AutoCallboardRuntime.pendingAcceptedQuestShare = nil
+  end
+end
+
+function AutoCallboardRuntime.TrackAcceptedQuest(arg1, arg2)
+  local first = tonumber(arg1)
+  local second = tonumber(arg2)
+  local questLogIndex = second and first or nil
+  local questID = second
+  local entry
+
+  if questLogIndex then
+    entry = AutoCallboardRuntime.GetQuestLogEntryInfo(questLogIndex)
+  elseif first then
+    local possibleEntry = AutoCallboardRuntime.GetQuestLogEntryInfo(first)
+    if possibleEntry and tonumber(possibleEntry.questID) and tonumber(possibleEntry.questID) ~= first then
+      questLogIndex = first
+      questID = tonumber(possibleEntry.questID)
+      entry = possibleEntry
+    else
+      questID = first
+    end
+  end
+
+  if (not questID or questID <= 0) and entry and tonumber(entry.questID) then
+    questID = tonumber(entry.questID)
+  end
+
+  if not questID or questID <= 0 then
+    AppendDebugLog("quest", "accepted quest id unavailable arg1=" .. tostring(arg1) .. " arg2=" .. tostring(arg2))
+    return
+  end
+
+  AutoCallboardRuntime.lastAcceptedQuest = {
+    questID = questID,
+    questLogIndex = questLogIndex,
+    title = entry and entry.title or "",
+    acceptedAt = GetTime(),
+  }
+  AutoCallboardRuntime.pendingAcceptedQuestShare = {
+    questID = questID,
+    title = AutoCallboardRuntime.lastAcceptedQuest.title,
+    questLogIndex = questLogIndex,
+    expiresAt = GetTime() + ACCEPTED_QUEST_SHARE_TIMEOUT,
+    nextAttemptAt = nil,
+  }
+
+  Print("Accepted quest: " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest))
+  AppendDebugLog("quest", "accepted " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest) .. " index=" .. tostring(questLogIndex or "unknown"))
+  if AutoCallboardRuntime.UpdateShareButtonState then
+    AutoCallboardRuntime.UpdateShareButtonState()
+  end
+  AutoCallboardRuntime.ProcessPendingAcceptedQuestShare("QUEST_ACCEPTED")
 end
 
 local function IsSelectedQuestDone()
@@ -1465,7 +2001,7 @@ local function ResumeAfterSelectedQuest(source)
   if GetSummonCooldownRemaining() > 0 then
     SetRollPause("no_callboard", "Quest done: " .. title .. ". Waiting for Callboard cooldown.")
   else
-    SetRollPause("no_callboard", "Quest done: " .. title .. ". Click Start or Callboard to summon the next board.")
+    SetRollPause("no_callboard", "Quest done: " .. title .. ". Checking objective data again.")
   end
   AppendDebugLog("quest", "quest done source=" .. tostring(source) .. " title=" .. tostring(title))
 end
@@ -1502,6 +2038,39 @@ local function ToggleDesiredQuest(key)
   end
 end
 
+function AutoCallboardRuntime.CloseObjectiveBoardAfterSelection(source)
+  if GossipFrame then
+    if GossipFrame.SetAlpha then
+      GossipFrame:SetAlpha(1)
+    end
+
+    if GossipFrame.EnableMouse then
+      GossipFrame:EnableMouse(true)
+    end
+
+    if GossipFrame.ClearAllPoints and GossipFrame.SetPoint then
+      GossipFrame:ClearAllPoints()
+      GossipFrame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 16, -116)
+    end
+  end
+
+  if GossipFrameCloseButton and GossipFrameCloseButton.Click then
+    GossipFrameCloseButton:Click()
+  elseif CloseGossip then
+    CloseGossip()
+  elseif GossipFrame and HideUIPanel then
+    HideUIPanel(GossipFrame)
+  end
+
+  if ProjectEbonhold and ProjectEbonhold.ObjectivesUI and ProjectEbonhold.ObjectivesUI.HideObjectives then
+    ProjectEbonhold.ObjectivesUI.HideObjectives()
+  elseif _G.ObjectivesMainFrame and _G.ObjectivesMainFrame.Hide then
+    _G.ObjectivesMainFrame:Hide()
+  end
+
+  AppendDebugLog("guard", "closed board after selection source=" .. tostring(source))
+end
+
 local function SelectObjectiveIndex(index)
   if not index then
     return false
@@ -1524,6 +2093,7 @@ local function SelectObjectiveIndex(index)
   if selected then
     SetQuestStatus("Selected objective slot " .. tostring(index) .. ".")
     StartSelectedQuestPause(objective, index)
+    AutoCallboardRuntime.CloseObjectiveBoardAfterSelection("selected slot " .. tostring(index))
   end
 
   return selected
@@ -1533,12 +2103,17 @@ StopRolling = function(message)
   rolling = false
   rollPausedReason = nil
   rollPauseMessage = nil
+  AutoCallboardRuntime.manualBoardOpenRequired = false
+  AutoCallboardRuntime.objectiveBoardReadyUntil = nil
+  AutoCallboardRuntime.objectiveBoardAccessOpen = false
+  AutoCallboardRuntime.objectiveRequestPendingUntil = nil
+  AutoCallboardRuntime.nextObjectiveRequestAt = nil
+  AutoCallboardRuntime.objectiveRequestAttempts = 0
   pendingReroll = false
   nextRollAt = nil
   pendingRerollUntil = nil
   selectedQuest = nil
   nextSelectedQuestCheckAt = nil
-  nextSummonAttemptAt = nil
   AutoCallboardRuntime.blockedMatchKey = nil
 
   if message then
@@ -1632,7 +2207,6 @@ ResumeRollingAfterCallboardActive = function(source)
 
   pendingReroll = false
   pendingRerollUntil = nil
-  nextSummonAttemptAt = nil
   nextRollAt = GetTime() + 0.2
   lastObjectiveSignature = ObjectiveSignature(CaptureCurrentObjectives())
   SetQuestStatus("Callboard active. Resuming roll.")
@@ -1733,31 +2307,32 @@ local function ProcessRolling()
     return
   end
 
-  if not IsCallboardActive() then
-    local cooldownRemaining = GetSummonCooldownRemaining()
-    if cooldownRemaining > 0 then
-      SetRollPause("no_callboard", "Paused: waiting for Callboard cooldown.")
-    else
-      SetRollPause("no_callboard", "Paused: click Start or Callboard to summon.")
+  if AutoCallboardRuntime.objectiveRequestPendingUntil and GetTime() >= AutoCallboardRuntime.objectiveRequestPendingUntil and not AutoCallboardRuntime.HasCurrentObjectiveData() then
+    AutoCallboardRuntime.objectiveRequestPendingUntil = nil
+  end
+
+  local boardAccess = AutoCallboardRuntime.GetBoardAccessState("rolling")
+
+  if not boardAccess.ok then
+    if boardAccess.boardOpen and boardAccess.needsData then
+      SetRollPause("no_callboard", boardAccess.message)
+
+      if AutoCallboardRuntime.RequestObjectiveBoardData("roll " .. tostring(boardAccess.reason)) then
+        return
+      end
     end
+
+    AutoCallboardRuntime.SetManualBoardOpenRequired("roll board guard:" .. tostring(boardAccess.reason))
     return
   end
 
-  if not AutoCallboardRuntime.IsCallboardDataAvailable() then
-    SetRollPause("no_callboard", "Paused: opening Callboard.")
-
-    local now = GetTime()
-    if not nextSummonAttemptAt or now >= nextSummonAttemptAt then
-      nextSummonAttemptAt = now + 1.5
-      QueueCallboardFollowup("roll ui missing")
-    end
-
-    return
+  if AutoCallboardRuntime.manualBoardOpenRequired then
+    AutoCallboardRuntime.manualBoardOpenRequired = false
+    AppendDebugLog("guard", "board access detected after manual pause source=" .. tostring(boardAccess.source))
   end
 
-  if rollPausedReason == "no_callboard" or rollPausedReason == "no_wanted" then
+  if rollPausedReason == "no_callboard" or rollPausedReason == "no_wanted" or rollPausedReason == "manual_board" then
     ClearRollPause()
-    nextSummonAttemptAt = nil
   end
 
   local now = GetTime()
@@ -1862,6 +2437,19 @@ StartRolling = function()
   selectedQuest = nil
   rollPausedReason = nil
   rollPauseMessage = nil
+  local activeBoardSession = AutoCallboardRuntime.IsCallboardUiPresent()
+      or (AutoCallboardRuntime.objectiveBoardAccessOpen
+      and SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil) > 0)
+  AutoCallboardRuntime.manualBoardOpenRequired = false
+  if not activeBoardSession then
+    AutoCallboardRuntime.objectiveBoardReadyUntil = nil
+    AutoCallboardRuntime.objectiveBoardAccessOpen = false
+  end
+  AutoCallboardRuntime.objectiveRequestPendingUntil = nil
+  AutoCallboardRuntime.nextObjectiveRequestAt = nil
+  AutoCallboardRuntime.objectiveRequestAttempts = 0
+  pendingInteractAt = nil
+  AutoCallboardRuntime.pendingInteractSource = nil
   nextSelectedQuestCheckAt = nil
   pendingReroll = false
   AutoCallboardRuntime.blockedMatchKey = nil
@@ -1875,15 +2463,17 @@ StartRolling = function()
     return
   end
 
-  if not IsCallboardActive() then
-    SetRollPause("no_callboard", "Started: waiting for Callboard.")
-    if GetSummonCooldownRemaining() <= 0 then
-      AppendDebugLog("summon", "start waiting for secure click summon")
+  local boardAccess = AutoCallboardRuntime.GetBoardAccessState("start")
+
+  if not boardAccess.ok then
+    if boardAccess.boardOpen and boardAccess.needsData then
+      SetRollPause("no_callboard", boardAccess.message)
+      if not AutoCallboardRuntime.RequestObjectiveBoardData("start " .. tostring(boardAccess.reason)) then
+        AutoCallboardRuntime.SetManualBoardOpenRequired("start data missing")
+      end
+    else
+      AutoCallboardRuntime.SetManualBoardOpenRequired("start board guard:" .. tostring(boardAccess.reason))
     end
-  elseif not AutoCallboardRuntime.IsCallboardDataAvailable() then
-    SetRollPause("no_callboard", "Started: opening Callboard.")
-    nextSummonAttemptAt = GetTime() + 1.5
-    QueueCallboardFollowup("start ui missing")
   elseif not EvaluateCurrentObjectives() then
     SetQuestStatus("Rolling for " .. tostring(CountDesiredQuests()) .. " wanted quest(s).")
   end
@@ -1906,6 +2496,7 @@ local function CompactText(value)
 
   value = tostring(value)
   value = value:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+  value = value:gsub("|", "/")
   value = value:gsub("%s+", " ")
 
   if value:len() > 80 then
@@ -1955,11 +2546,166 @@ AppendDebugLog = function(kind, message)
   end
 end
 
+function AutoCallboardRuntime.SafeUnitValue(unit, getter)
+  if not getter then
+    return nil
+  end
+
+  local ok, value = pcall(getter, unit)
+  if ok then
+    return value
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.SafeInteractDistance(unit, index)
+  if not CheckInteractDistance then
+    return nil
+  end
+
+  local ok, value = pcall(CheckInteractDistance, unit, index)
+  if ok then
+    return value
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.SniffUnitLine(unit)
+  local name = AutoCallboardRuntime.SafeUnitValue(unit, UnitName)
+  local guid = AutoCallboardRuntime.SafeUnitValue(unit, UnitGUID)
+  local exists = AutoCallboardRuntime.SafeUnitValue(unit, UnitExists)
+  local objectId = AutoCallboardRuntime.ExtractBoardObjectIdFromGuid and AutoCallboardRuntime.ExtractBoardObjectIdFromGuid(guid) or nil
+  local knownBoard = AutoCallboardRuntime.IsKnownBoardObjectId and AutoCallboardRuntime.IsKnownBoardObjectId(objectId) or false
+  local distance3 = AutoCallboardRuntime.SafeInteractDistance(unit, 3)
+
+  return tostring(unit)
+      .. " exists=" .. tostring(exists)
+      .. " name=" .. CompactText(name)
+      .. " guid=" .. tostring(guid)
+      .. " id=" .. tostring(objectId)
+      .. " knownBoard=" .. tostring(knownBoard)
+      .. " interact3=" .. tostring(distance3)
+end
+
+function AutoCallboardRuntime.SniffGossipLine()
+  local name = AutoCallboardRuntime.GossipDebugName and AutoCallboardRuntime.GossipDebugName() or "none"
+  local shown = AutoCallboardRuntime.IsGossipFrameOpen and AutoCallboardRuntime.IsGossipFrameOpen() or false
+  local text = "unavailable"
+  local optionCount = "unavailable"
+
+  if GetGossipText then
+    local ok, value = pcall(GetGossipText)
+    if ok then
+      text = CompactText(value)
+    end
+  end
+
+  if GetNumGossipOptions then
+    local ok, value = pcall(GetNumGossipOptions)
+    if ok then
+      optionCount = tostring(value)
+    end
+  end
+
+  return "gossip shown=" .. tostring(shown) .. " name=" .. CompactText(name) .. " options=" .. tostring(optionCount) .. " text=" .. text
+end
+
+function AutoCallboardRuntime.SniffBoardAccessLine()
+  local access = AutoCallboardRuntime.GetBoardAccessState and AutoCallboardRuntime.GetBoardAccessState("sniff") or nil
+
+  if not access then
+    return "access unavailable"
+  end
+
+  return "access ok=" .. tostring(access.ok)
+      .. " reason=" .. tostring(access.reason)
+      .. " source=" .. tostring(access.source or "none")
+      .. " boardName=" .. tostring(access.boardName or "none")
+      .. " boardObjectId=" .. tostring(access.boardObjectId or "none")
+      .. " data=" .. tostring(AutoCallboardRuntime.HasCurrentObjectiveData and AutoCallboardRuntime.HasCurrentObjectiveData() or false)
+end
+
+function AutoCallboardRuntime.AppendInteractionSniffSnapshot(source, event, arg1, arg2, arg3, arg4, arg5)
+  AppendDebugLog("sniff", "source=" .. tostring(source) .. " event=" .. tostring(event) .. " args: 1=" .. CompactText(arg1) .. ", 2=" .. CompactText(arg2) .. ", 3=" .. CompactText(arg3) .. ", 4=" .. CompactText(arg4) .. ", 5=" .. CompactText(arg5))
+  AppendDebugLog("sniff", AutoCallboardRuntime.SniffBoardAccessLine())
+  AppendDebugLog("sniff", AutoCallboardRuntime.SniffGossipLine())
+  AppendDebugLog("sniff", AutoCallboardRuntime.SniffUnitLine("npc"))
+  AppendDebugLog("sniff", AutoCallboardRuntime.SniffUnitLine("target"))
+  AppendDebugLog("sniff", AutoCallboardRuntime.SniffUnitLine("mouseover"))
+end
+
+function AutoCallboardRuntime.IsInteractionSnifferEnabled()
+  return state and state.debug and state.debug.sniffer
+end
+
+function AutoCallboardRuntime.InstallInteractionSnifferHooks()
+  if AutoCallboardRuntime.worldFrameSnifferHooked or not WorldFrame or not WorldFrame.HookScript then
+    return
+  end
+
+  AutoCallboardRuntime.worldFrameSnifferHooked = true
+  WorldFrame:HookScript("OnMouseDown", function(_, buttonName)
+    if AutoCallboardRuntime.IsInteractionSnifferEnabled() then
+      AutoCallboardRuntime.AppendInteractionSniffSnapshot("WorldFrame OnMouseDown " .. tostring(buttonName), "WORLD_MOUSE_DOWN")
+    end
+    end)
+  WorldFrame:HookScript("OnMouseUp", function(_, buttonName)
+    if AutoCallboardRuntime.IsInteractionSnifferEnabled() then
+      AutoCallboardRuntime.AppendInteractionSniffSnapshot("WorldFrame OnMouseUp " .. tostring(buttonName), "WORLD_MOUSE_UP")
+    end
+    end)
+end
+
+function AutoCallboardRuntime.SetInteractionSnifferEnabled(value)
+  local nextState = Core.mergeState(state)
+  nextState.debug.sniffer = value and true or false
+  if nextState.debug.sniffer and (not nextState.debug.maxLog or nextState.debug.maxLog < 240) then
+    nextState.debug.maxLog = 240
+  end
+  ApplyState(nextState)
+  AutoCallboardRuntime.InstallInteractionSnifferHooks()
+  AppendDebugLog("sniff", "interaction sniffer " .. (nextState.debug.sniffer and "on" or "off"))
+  if nextState.debug.sniffer then
+    AutoCallboardRuntime.AppendInteractionSniffSnapshot("sniff on", "MANUAL_SNIFF_ON")
+  end
+  ShowDebugWindow()
+end
+
+function AutoCallboardRuntime.OpenEventTrace()
+  local opened = false
+
+  if EventTraceFrame then
+    if EventTraceFrame.Show then
+      EventTraceFrame:Show()
+      opened = true
+    end
+
+    if EventTraceFrame.StartEventCapture then
+      pcall(EventTraceFrame.StartEventCapture, EventTraceFrame)
+    end
+  elseif SlashCmdList and SlashCmdList.EVENTTRACE then
+    local ok = pcall(SlashCmdList.EVENTTRACE, "")
+    opened = ok
+  end
+
+  if opened then
+    AppendDebugLog("debug", "EventTrace opened")
+    Print("EventTrace opened. Use it with /acb sniff for board testing.")
+  else
+    AppendDebugLog("debug", "EventTrace is not available in this client")
+    Print("EventTrace is not available in this client.")
+  end
+end
+
 local function FormatDebugLogs()
   local log = EnsureDebugLog()
   local lines = {}
 
   table.insert(lines, "AutoCallboard Debug Log")
+  table.insert(lines, "Version: " .. GetAddonVersion())
+  table.insert(lines, "Interaction sniffer: " .. tostring(state and state.debug and state.debug.sniffer or false))
   table.insert(lines, "Use Select All, then Ctrl+C to copy this text.")
   table.insert(lines, "Default reroll target: ObjectivesMainFrame.rerollBtn")
   table.insert(lines, "Default objective targets: ObjectiveFrame1.selectBtn, ObjectiveFrame2.selectBtn, ObjectiveFrame3.selectBtn")
@@ -2015,7 +2761,7 @@ local function SetDebugSelectionVisible(selected)
   end
 end
 
-local function ShowDebugWindow()
+ShowDebugWindow = function()
   if not debugWindow then
     debugWindow = CreateFrame("Frame", "AutoCallboardDebugWindow", UIParent)
     RegisterSpecialFrame("AutoCallboardDebugWindow")
@@ -2252,6 +2998,69 @@ local function DumpKnownFrames()
   end
 
   ShowDebugWindow()
+end
+
+function AutoCallboardRuntime.UnitDebugName(unit)
+  if UnitExists and UnitExists(unit) then
+    return tostring(UnitName(unit) or "unknown")
+  end
+
+  return "none"
+end
+
+function AutoCallboardRuntime.TooltipDebugText()
+  local parts = {}
+
+  if GameTooltip and GameTooltip.IsShown and GameTooltip:IsShown() then
+    table.insert(parts, "shown=true")
+  else
+    table.insert(parts, "shown=false")
+  end
+
+  for i = 1, 4 do
+    local text = AutoCallboardRuntime.CleanBoardText(AutoCallboardRuntime.GetTooltipLineText(i))
+
+    if text ~= "" then
+      table.insert(parts, tostring(i) .. "=\"" .. CompactText(text) .. "\"")
+    end
+  end
+
+  return table.concat(parts, " ")
+end
+
+function AutoCallboardRuntime.GossipDebugName()
+  if GossipFrameNpcNameText and GossipFrameNpcNameText.GetText then
+    local text = AutoCallboardRuntime.CleanBoardText(GossipFrameNpcNameText:GetText())
+
+    if text ~= "" then
+      return text
+    end
+  end
+
+  return "none"
+end
+
+function AutoCallboardRuntime.ProximityDebugText()
+  if _G.ClosestGameObjectPosition then
+    return "ClosestGameObjectPosition=available objectIDs=600600"
+  end
+
+  return "ClosestGameObjectPosition=unavailable objectIDs=600600"
+end
+
+function AutoCallboardRuntime.AppendBoardDetectionDebugSnapshot()
+  local focus = GetMouseFocus and GetMouseFocus() or nil
+  local access = AutoCallboardRuntime.GetBoardAccessState("debug")
+  local npcBoard = AutoCallboardRuntime.GetNpcBoardInfo and AutoCallboardRuntime.GetNpcBoardInfo() or nil
+  AppendDebugLog("debug", "board target=" .. AutoCallboardRuntime.UnitDebugName("target") .. " mouseover=" .. AutoCallboardRuntime.UnitDebugName("mouseover") .. " focus=" .. FrameSummary(focus))
+  AppendDebugLog("debug", "board access ok=" .. tostring(access.ok) .. " reason=" .. tostring(access.reason) .. " source=" .. tostring(access.source or "none") .. " ui=" .. tostring(AutoCallboardRuntime.IsCallboardUiPresent()) .. " session=" .. tostring(AutoCallboardRuntime.objectiveBoardAccessOpen) .. " data=" .. tostring(AutoCallboardRuntime.HasCurrentObjectiveData()))
+  if npcBoard then
+    AppendDebugLog("debug", "board npc name=" .. tostring(npcBoard.name) .. " id=" .. tostring(npcBoard.objectId) .. " guid=" .. tostring(npcBoard.guid) .. " nameMatch=" .. tostring(npcBoard.nameMatches) .. " idMatch=" .. tostring(npcBoard.idMatches))
+  else
+    AppendDebugLog("debug", "board npc=none gossipOpen=" .. tostring(AutoCallboardRuntime.IsGossipFrameOpen()))
+  end
+  AppendDebugLog("debug", "board proximity " .. AutoCallboardRuntime.ProximityDebugText())
+  AppendDebugLog("debug", "board tooltip=" .. AutoCallboardRuntime.TooltipDebugText() .. " worldMatch=" .. tostring(AutoCallboardRuntime.GetWorldTooltipBoardName() or "none") .. " gossip=" .. AutoCallboardRuntime.GossipDebugName())
 end
 
 local function PrintRecentLogs()
@@ -2493,6 +3302,8 @@ local function AppendQuestDebugSnapshot()
   AppendDebugLog("debug", "snapshot profile=" .. tostring(characterProfileKey) .. " rolling=" .. tostring(rolling) .. " roll=" .. tostring(rollCount) .. "/" .. tostring(state and state.maxRerolls) .. " desired=" .. tostring(table.getn(desiredKeys)) .. " current=" .. tostring(table.getn(objectives)) .. " signature=" .. ObjectiveSignature(objectives))
   AppendDebugLog("debug", "pause=" .. tostring(rollPausedReason) .. " selected=" .. tostring(selectedQuest and selectedQuest.title))
   AppendDebugLog("debug", "activeObjective=" .. tostring(activeObjective and QuestLabel(activeObjective) or "none"))
+  AppendDebugLog("debug", "objectiveBoard ready=" .. FormatSeconds(SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil)) .. " pending=" .. FormatSeconds(SecondsRemaining(AutoCallboardRuntime.objectiveRequestPendingUntil)) .. " attempts=" .. tostring(AutoCallboardRuntime.objectiveRequestAttempts or 0) .. " open=" .. tostring(AutoCallboardRuntime.objectiveBoardAccessOpen) .. " manual=" .. tostring(AutoCallboardRuntime.manualBoardOpenRequired))
+  AutoCallboardRuntime.AppendBoardDetectionDebugSnapshot()
   AutoCallboardRuntime.AppendCallboardCooldownDebugSnapshot()
 
   if table.getn(desiredKeys) == 0 then
@@ -2685,6 +3496,16 @@ local function SetButtonEnabled(target, enabled)
   SetButtonVisual(target)
 end
 
+function AutoCallboardRuntime.UpdateShareButtonState()
+  local enabled = AutoCallboardRuntime.lastAcceptedQuest ~= nil
+
+  SetButtonEnabled(AutoCallboardRuntime.shareQuestButton, enabled)
+
+  if controlFrame and controlFrame.shareButton then
+    SetButtonEnabled(controlFrame.shareButton, enabled)
+  end
+end
+
 local function RefreshRollButtonMacroState(target)
   if not target or not target._acbRollToggle or not target.SetAttribute then
     return
@@ -2697,7 +3518,7 @@ local function RefreshRollButtonMacroState(target)
   if rolling then
     AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, "", "start")
   else
-    AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, AutoCallboardRuntime.GetSummonMacroText(), "start")
+    AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, "", "start")
   end
 end
 
@@ -2739,14 +3560,22 @@ function AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, macroText
     return
   end
 
+  macroText = macroText or ""
+
   if InCombatLockdown and InCombatLockdown() then
     AppendDebugLog("summon", "deferred secure " .. tostring(label) .. " update in combat")
     return
   end
 
+  if target._acbSecureType == "macro" and target._acbSecureMacroText == macroText then
+    return
+  end
+
   target:SetAttribute("type", "macro")
-  target:SetAttribute("macrotext", macroText or "")
-  AppendDebugLog("summon", "secure " .. tostring(label) .. " macro set to " .. tostring(macroText or ""))
+  target:SetAttribute("macrotext", macroText)
+  target._acbSecureType = "macro"
+  target._acbSecureMacroText = macroText
+  AppendDebugLog("summon", "secure " .. tostring(label) .. " macro set to " .. tostring(macroText))
 end
 
 function AutoCallboardRuntime.ConfigureStartButton(target)
@@ -2755,15 +3584,17 @@ function AutoCallboardRuntime.ConfigureStartButton(target)
   end
 
   target._acbRollToggle = true
-  AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, AutoCallboardRuntime.GetSummonMacroText(), "start")
+  AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, "", "start")
   target:SetScript("PreClick", function()
     if rolling then
       return
     end
 
+    preClickTargetedBoardName = nil
     preClickCooldownRemaining = GetSummonCooldownRemaining()
     preClickWasActive = IsCallboardActive()
     preClickWasUsable = IsSummonSpellUsable()
+    AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, "", "start")
     end)
   target:SetScript("PostClick", function()
     if rolling then
@@ -2772,27 +3603,14 @@ function AutoCallboardRuntime.ConfigureStartButton(target)
       return
     end
 
-    local shouldStartRolling = true
-
     if preClickWasActive then
       Print("Callboard is already active for " .. FormatSeconds(SecondsRemaining(callboardActiveUntil)) .. ".")
-    elseif preClickCooldownRemaining and preClickCooldownRemaining > 0 then
-      Print("Summon Callboard is on cooldown for " .. FormatSeconds(preClickCooldownRemaining) .. ".")
-      AppendDebugLog("summon", "blocked secure click cooldown=" .. tostring(preClickCooldownRemaining))
-    elseif not preClickWasUsable then
-      Print("Summon Callboard is not usable here.")
-      AppendDebugLog("summon", "blocked secure click unusable")
-      shouldStartRolling = false
     else
-      AutoCallboardRuntime.BeginSummonAttempt("start button")
-      Print("Summoning \"" .. state.targetName .. "\"...")
+      AppendDebugLog("summon", "start roll requested; summon skipped")
     end
 
-    if shouldStartRolling then
-      StartRolling()
-    else
-      UpdateRollToggleButtons()
-    end
+    StartRolling()
+    preClickTargetedBoardName = nil
     UpdateSummonStatus()
     end)
 end
@@ -3042,6 +3860,10 @@ function AutoCallboardRuntime.PositionControlHeader()
     buttonRowWidth = buttonRowWidth + 5 + (controlFrame.startButton:GetWidth() or 72)
   end
 
+  if controlFrame.shareButton then
+    buttonRowWidth = buttonRowWidth + 4 + (controlFrame.shareButton:GetWidth() or 54)
+  end
+
   if controlFrame.questButton then
     buttonRowWidth = buttonRowWidth + 4 + (controlFrame.questButton:GetWidth() or 50)
   end
@@ -3061,7 +3883,7 @@ function AutoCallboardRuntime.PositionControlHeader()
   if summonStatusText then
     summonStatusText:ClearAllPoints()
     summonStatusText:SetPoint("TOPLEFT", button, "BOTTOMLEFT", 0, -5)
-    summonStatusText:SetWidth(256)
+    summonStatusText:SetWidth(math.max(180, (frameWidth or AutoCallboardRuntime.controlCollapsedWidth) - 20))
   end
 end
 
@@ -3172,6 +3994,7 @@ function AutoCallboardRuntime.SetQuestPanelExpanded(expanded)
     end
 
     AutoCallboardRuntime.AnimateControlFrameSize(AutoCallboardRuntime.controlCollapsedWidth, AutoCallboardRuntime.controlCollapsedHeight, function()
+        AutoCallboardRuntime.PositionControlHeader()
         AutoCallboardRuntime.questPanelChanging = false
     end)
   end
@@ -3296,11 +4119,13 @@ function AutoCallboardRuntime.CreateQuestWindow()
     knownQuestRows[i]:SetPoint("TOPLEFT", knownPageText, "BOTTOMLEFT", 0, -10 - ((i - 1) * QUEST_ROW_HEIGHT))
   end
 
+  local questToolbarWidth = 72 + 8 + 72 + 8 + 54 + 8 + 66 + 8 + 66
+
   refreshQuestButton = CreateFrame("Button", nil, questWindow, "UIPanelButtonTemplate")
   refreshQuestButton:SetWidth(72)
   refreshQuestButton:SetHeight(24)
   refreshQuestButton:SetText("Refresh")
-  refreshQuestButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOMLEFT", 24, 46)
+  refreshQuestButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOM", -(questToolbarWidth / 2), 46)
   SkinButton(refreshQuestButton)
   refreshQuestButton:SetScript("OnClick", function()
     CaptureCurrentObjectives()
@@ -3316,11 +4141,33 @@ function AutoCallboardRuntime.CreateQuestWindow()
   AutoCallboardRuntime.ConfigureStartButton(startRollButton)
   UpdateRollToggleButtonState(startRollButton, IsQuestRollStartAvailable())
 
+  AutoCallboardRuntime.shareQuestButton = CreateFrame("Button", nil, questWindow, "UIPanelButtonTemplate")
+  AutoCallboardRuntime.shareQuestButton:SetWidth(54)
+  AutoCallboardRuntime.shareQuestButton:SetHeight(24)
+  AutoCallboardRuntime.shareQuestButton:SetText("Share")
+  AutoCallboardRuntime.shareQuestButton:SetPoint("LEFT", startRollButton, "RIGHT", 8, 0)
+  SkinButton(AutoCallboardRuntime.shareQuestButton)
+  AutoCallboardRuntime.shareQuestButton:SetScript("OnClick", function()
+    AutoCallboardRuntime.ShareAcceptedQuest("quest window button")
+    end)
+  AutoCallboardRuntime.shareQuestButton:SetScript("OnEnter", function(self)
+    SetButtonVisual(self, "hover")
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Share")
+    GameTooltip:AddLine("Shares the last accepted quest.", 1, 1, 1)
+    GameTooltip:Show()
+    end)
+  AutoCallboardRuntime.shareQuestButton:SetScript("OnLeave", function(self)
+    SetButtonVisual(self)
+    GameTooltip:Hide()
+    end)
+  AutoCallboardRuntime.UpdateShareButtonState()
+
   local exportDataButton = CreateFrame("Button", nil, questWindow, "UIPanelButtonTemplate")
   exportDataButton:SetWidth(66)
   exportDataButton:SetHeight(24)
   exportDataButton:SetText("Export")
-  exportDataButton:SetPoint("LEFT", startRollButton, "RIGHT", 8, 0)
+  exportDataButton:SetPoint("LEFT", AutoCallboardRuntime.shareQuestButton, "RIGHT", 8, 0)
   SkinButton(exportDataButton)
   exportDataButton:SetScript("OnClick", function()
     ShowQuestDataWindow("export")
@@ -3374,6 +4221,18 @@ local function HandleDebugAction(action, value)
     nextState.debug.mouseWatch = value
     ApplyState(nextState)
     Print("Mouse watch is " .. (value and "on" or "off") .. ".")
+  elseif action == "sniffer" then
+    AutoCallboardRuntime.SetInteractionSnifferEnabled(value)
+  elseif action == "sniffDump" then
+    AutoCallboardRuntime.InstallInteractionSnifferHooks()
+    AutoCallboardRuntime.AppendInteractionSniffSnapshot("manual", "MANUAL_SNIFF_DUMP")
+    ShowDebugWindow()
+  elseif action == "sniffClear" then
+    AutoCallboardDebugLog = {}
+    AppendDebugLog("sniff", "interaction sniffer cleared")
+    ShowDebugWindow()
+  elseif action == "etrace" then
+    AutoCallboardRuntime.OpenEventTrace()
   elseif action == "inspect" then
     InspectMouseFocus()
   elseif action == "dump" then
@@ -3521,24 +4380,47 @@ local function CreateMinimapButton()
   PositionMinimapButton()
 end
 
-local function TargetCallboard()
-  if TargetByName then
-    TargetByName(state.targetName, true)
+local function TargetBoardName(name)
+  if not name or name == "" then
+    return false
   end
 
-  if UnitExists("target") and UnitName("target") == state.targetName then
-    return true
+  if TargetByName then
+    TargetByName(name, true)
+  end
+
+  if UnitExists("target") and UnitName("target") == name then
+    return true, name
+  end
+
+  return false
+end
+
+TargetCallboard = function()
+  local found, targetName
+  for i = 1, table.getn(BOARD_TARGET_PRIMARY_NAMES) do
+    found, targetName = TargetBoardName(BOARD_TARGET_PRIMARY_NAMES[i])
+    if found then
+      return true, targetName
+    end
+  end
+
+  found, targetName = TargetBoardName(state.targetName)
+  if found then
+    return true, targetName
   end
 
   return false
 end
 
 local function TryInteract()
+  local source = AutoCallboardRuntime.pendingInteractSource
   pendingInteractAt = nil
+  AutoCallboardRuntime.pendingInteractSource = nil
 
-  if not TargetCallboard() then
-    SetQuestStatus("Could not target \"" .. state.targetName .. "\". Click the board manually if it is visible.")
-    AppendDebugLog("summon", "could not target " .. tostring(state.targetName))
+  local targeted, targetName = TargetCallboard()
+  if not targeted then
+    AutoCallboardRuntime.SetManualBoardOpenRequired(source)
     return
   end
 
@@ -3547,7 +4429,7 @@ local function TryInteract()
   if InteractUnit then
     InteractUnit("target")
   else
-    SetQuestStatus("Targeted \"" .. state.targetName .. "\". Right-click it to open the quest.")
+    SetQuestStatus("Targeted \"" .. targetName .. "\". Right-click it to open the quest.")
   end
 end
 
@@ -3655,6 +4537,7 @@ QueueCallboardFollowup = function(source)
   end
 
   pendingInteractAt = GetTime() + INTERACT_DELAY
+  AutoCallboardRuntime.pendingInteractSource = source
 end
 
 StartCallboardFlow = function(silent)
@@ -3666,6 +4549,19 @@ StartCallboardFlow = function(silent)
       Print("Callboard is already active.")
     end
 
+    return
+  end
+
+  local targeted, targetName = TargetCallboard()
+  if targeted then
+    AppendDebugLog("summon", "opening nearby board " .. tostring(targetName))
+    QueueCallboardFollowup("slash nearby board")
+
+    if not silent then
+      Print("Opening \"" .. targetName .. "\"...")
+    end
+
+    UpdateSummonStatus()
     return
   end
 
@@ -3974,12 +4870,26 @@ local function CreateCallboardButton()
   SkinButton(button)
   ApplySummonButtonAttributes()
   button:SetScript("PreClick", function()
+    preClickTargetedBoardName = nil
     preClickCooldownRemaining = GetSummonCooldownRemaining()
     preClickWasActive = IsCallboardActive()
     preClickWasUsable = IsSummonSpellUsable()
+
+    if not preClickWasActive then
+      local targeted, targetName = TargetCallboard()
+      if targeted then
+        preClickTargetedBoardName = targetName
+        AutoCallboardRuntime.ApplySecureMacroButtonAttributes(button, "", "callboard nearby board")
+      else
+        ApplySummonButtonAttributes()
+      end
+    end
     end)
   button:SetScript("PostClick", function()
-    if preClickWasActive then
+    if preClickTargetedBoardName then
+      AppendDebugLog("summon", "button using nearby board " .. tostring(preClickTargetedBoardName))
+      QueueCallboardFollowup("button nearby board")
+    elseif preClickWasActive then
       ResumeRollingAfterCallboardActive("secure button active")
       QueueCallboardFollowup("secure button active")
       Print("Callboard is already active for " .. FormatSeconds(SecondsRemaining(callboardActiveUntil)) .. ".")
@@ -3987,13 +4897,20 @@ local function CreateCallboardButton()
       Print("Summon Callboard is on cooldown for " .. FormatSeconds(preClickCooldownRemaining) .. ".")
       AppendDebugLog("summon", "blocked secure click cooldown=" .. tostring(preClickCooldownRemaining))
     elseif not preClickWasUsable then
-      Print("Summon Callboard is not usable here.")
-      AppendDebugLog("summon", "blocked secure click unusable")
+      if TargetCallboard() then
+        AppendDebugLog("summon", "button using nearby board fallback")
+        QueueCallboardFollowup("button nearby board")
+      else
+        Print("Summon Callboard is not usable here.")
+        AppendDebugLog("summon", "blocked secure click unusable")
+      end
     else
       AutoCallboardRuntime.BeginSummonAttempt("secure button")
       Print("Summoning \"" .. state.targetName .. "\"...")
     end
 
+    preClickTargetedBoardName = nil
+    ApplySummonButtonAttributes()
     UpdateSummonStatus()
     end)
   button:SetScript("OnDragStart", StartMovingButton)
@@ -4017,18 +4934,44 @@ local function CreateCallboardButton()
   controlFrame.startButton = mainStartButton
   AutoCallboardRuntime.ConfigureStartButton(mainStartButton)
   UpdateRollToggleButtonState(mainStartButton, true)
-  controlFrame.questButton = MakeActionButton(
-      "AutoCallboardQuestsButton",
-      "Quests",
-      50,
+  controlFrame.shareButton = MakeActionButton(
+      "AutoCallboardShareButton",
+      "Share",
+      54,
       24,
       "LEFT",
       mainStartButton,
       "RIGHT",
       4,
       0,
+      function()
+        AutoCallboardRuntime.ShareAcceptedQuest("main button")
+      end
+    )
+  controlFrame.shareButton:SetScript("OnEnter", function(self)
+    SetButtonVisual(self, "hover")
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Share")
+    GameTooltip:AddLine("Shares the last accepted quest.", 1, 1, 1)
+    GameTooltip:Show()
+    end)
+  controlFrame.shareButton:SetScript("OnLeave", function(self)
+    SetButtonVisual(self)
+    GameTooltip:Hide()
+    end)
+  controlFrame.questButton = MakeActionButton(
+      "AutoCallboardQuestsButton",
+      "Quests",
+      50,
+      24,
+      "LEFT",
+      controlFrame.shareButton,
+      "RIGHT",
+      4,
+      0,
       AutoCallboardRuntime.ToggleQuestPanel
     )
+  AutoCallboardRuntime.UpdateShareButtonState()
 
   summonStatusText = controlFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   summonStatusText:SetPoint("TOPLEFT", button, "BOTTOMLEFT", 0, -5)
@@ -4050,6 +4993,7 @@ frame:SetScript("OnUpdate", function()
     TryInteract()
   end
 
+  AutoCallboardRuntime.ProcessPendingAcceptedQuestShare("poll")
   UpdateSummonStatus()
   if SyncCallboardActiveFromCooldown then
     SyncCallboardActiveFromCooldown("cooldown inference")
@@ -4085,11 +5029,19 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
     AppendDebugLog("event", event)
   end
 
+  if event ~= "ADDON_LOADED" and AutoCallboardRuntime.IsInteractionSnifferEnabled() then
+    AutoCallboardRuntime.AppendInteractionSniffSnapshot("event", event, arg1, arg2, arg3, arg4, arg5)
+  end
+
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
     local mergedState, migratedLegacyQuestCount = MergeLegacyState(AutoCallboardDB)
     ApplyState(mergedState)
     ApplyCharacterProfile()
     EnsureDebugLog()
+    if AutoCallboardRuntime.IsInteractionSnifferEnabled() then
+      AutoCallboardRuntime.InstallInteractionSnifferHooks()
+      AppendDebugLog("sniff", "interaction sniffer restored after load")
+    end
     CreateCallboardButton()
     CreateMinimapButton()
 
@@ -4103,6 +5055,14 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
       Print("Restored " .. tostring(migratedLegacyQuestCount) .. " Callboard quest(s) from the ProjectCallboard data.")
       AppendDebugLog("migration", "restored legacy known quests count=" .. tostring(migratedLegacyQuestCount))
     end
+  elseif event == "GOSSIP_SHOW" then
+    local npcName = GossipFrameNpcNameText and GossipFrameNpcNameText:GetText()
+    local npcBoard = AutoCallboardRuntime.GetNpcBoardInfo and AutoCallboardRuntime.GetNpcBoardInfo() or nil
+    if AutoCallboardRuntime.IsObjectiveBoardGossipName(npcName) or npcBoard then
+      AutoCallboardRuntime.MarkObjectiveBoardOpened(event .. ":" .. tostring(npcName) .. ":" .. tostring(npcBoard and npcBoard.objectId or "no-id"))
+    end
+  elseif event == "GOSSIP_CLOSED" then
+    AutoCallboardRuntime.MarkObjectiveBoardClosed(event)
   elseif event == "QUEST_DETAIL" then
     if state and state.autoAccept and pendingAcceptUntil and GetTime() <= pendingAcceptUntil then
       pendingAcceptUntil = nil
@@ -4122,7 +5082,14 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
       nextSelectedQuestCheckAt = nil
       CheckSelectedQuestProgress(event)
     end
-  elseif event == "QUEST_ACCEPTED" or event == "QUEST_LOG_UPDATE" or event == "QUEST_FINISHED" then
+  elseif event == "QUEST_ACCEPTED" then
+    AutoCallboardRuntime.TrackAcceptedQuest(arg1, arg2)
+    nextSelectedQuestCheckAt = nil
+    CheckSelectedQuestProgress(event)
+  elseif event == "QUEST_LOG_UPDATE" or event == "QUEST_FINISHED" then
+    if event == "QUEST_LOG_UPDATE" then
+      AutoCallboardRuntime.ProcessPendingAcceptedQuestShare(event)
+    end
     nextSelectedQuestCheckAt = nil
     CheckSelectedQuestProgress(event)
   elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
@@ -4149,8 +5116,12 @@ frame:RegisterEvent("QUEST_GREETING")
 frame:RegisterEvent("QUEST_PROGRESS")
 frame:RegisterEvent("QUEST_COMPLETE")
 frame:RegisterEvent("QUEST_FINISHED")
+frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
 frame:RegisterEvent("GOSSIP_SHOW")
 frame:RegisterEvent("GOSSIP_CLOSED")
 pcall(frame.RegisterEvent, frame, "QUEST_TURNED_IN")
 pcall(frame.RegisterEvent, frame, "UNIT_SPELLCAST_SUCCEEDED")
 pcall(frame.RegisterEvent, frame, "SPELL_UPDATE_COOLDOWN")
+pcall(frame.RegisterEvent, frame, "PLAYER_INTERACTION_MANAGER_FRAME_SHOW")
+pcall(frame.RegisterEvent, frame, "PLAYER_INTERACTION_MANAGER_FRAME_HIDE")
