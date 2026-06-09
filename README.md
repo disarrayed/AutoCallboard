@@ -2,7 +2,8 @@
 
 # AutoCallboard
 
-Automatic Callboard rolling for Project Ebonhold. Pick wanted quests, start the roll, and let AutoCallboard stop when one appears.
+Automatic Callboard rolling for Project Ebonhold. Pick the quests you want,
+open a board, and let AutoCallboard stop when one appears.
 
 [![Latest release](https://img.shields.io/github/v/release/disarrayed/AutoCallboard.svg?style=for-the-badge&color=4b2e83)](https://github.com/disarrayed/AutoCallboard/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoCallboard/total.svg?label=downloads&style=for-the-badge&color=b048f8)](https://github.com/disarrayed/AutoCallboard/releases)
@@ -20,7 +21,8 @@ Automatic Callboard rolling for Project Ebonhold. Pick wanted quests, start the 
 
 ## How it works
 
-AutoCallboard watches the Project Ebonhold objective board UI and rolls until one of your wanted quests appears.
+AutoCallboard watches the Project Ebonhold objective board UI and rolls until
+one of your wanted quests appears.
 
 The normal flow:
 
@@ -29,10 +31,13 @@ The normal flow:
 3. Click `Start`.
 4. AutoCallboard checks for board access, then reads Project Ebonhold objective data and rolls.
 5. When a wanted quest appears, it selects the quest and pauses.
-6. AutoCallboard records the accepted quest ID and tries to share it with your group.
+6. AutoCallboard records the accepted quest ID and tries to share that quest
+   with your group.
 7. Finish the quest, then continue when you are ready.
 
-Use the `Callboard` button when you need to summon a board. At a normal `Objectives Board`, click the board to open it. `Start` does not summon, and it will not reroll or select from cached data if no board is opened.
+Use the `Callboard` button when you need to summon a board. At a normal
+`Objectives Board`, click the board to open it. `Start` does not summon, and it
+will not reroll or select from cached data if no board is open.
 
 Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, and the cost can add up fast.
 
@@ -51,7 +56,10 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 - `Start` rolls until a wanted quest appears
 - `Start` does not summon the Callboard
 - `Start` will not spend a reroll unless board access is detected through UI, board gossip, or the clicked board's `npc` token/object ID
-- `Share` retries sharing the last accepted quest
+- `Share` retries the last accepted quest from your quest log
+- `Auto Accept Quests` can accept quests shared by party or raid members
+- Auto Accept Quests is separate from board quest auto-accept
+- Auto Accept Quests does not rely on fixed quest IDs or titles
 - `Stop` ends rolling at any time
 - AutoCallboard selects a matched quest and pauses
 - The board window closes after a quest is selected
@@ -79,7 +87,6 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 2. Extract to `WoW\Interface\AddOns`
 3. Folder must be named `AutoCallboard`
 4. Restart WoW. A `/reload` is not enough on first install.
-5. In the addon list, AutoCallboard appears with a purple title.
 
 ---
 
@@ -91,6 +98,7 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 /acb callboard   Open a detected board or summon the Callboard
 /acb roll        Start rolling
 /acb stop        Stop rolling
+/acb autoacceptquests on|off  Turn Auto Accept Quests on or off
 /acb export      Export known quest data
 /acb import      Import known quest data
 /acb debug       Open the copyable debug log

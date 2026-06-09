@@ -22,7 +22,6 @@ local currentQuestRows = {}
 local knownQuestRows = {}
 local questStatusText
 local startRollButton
-local refreshQuestButton
 local knownPageText
 local knownScrollFrame
 local questSearchBox
@@ -656,75 +655,6 @@ local function ApplyState(nextState)
   end
 end
 
-local function CountDesiredMap(desired)
-  local count = 0
-
-  if type(desired) ~= "table" then
-    return count
-  end
-
-  for _, enabled in pairs(desired) do
-    if enabled == true then
-      count = count + 1
-    end
-  end
-
-  return count
-end
-
-local function MergeDesiredMaps(base, incoming)
-  local merged = Core.copyDesiredMap(base)
-
-  if type(incoming) ~= "table" then
-    return merged
-  end
-
-  for key, enabled in pairs(incoming) do
-    if type(key) == "string" and enabled == true then
-      merged[key] = true
-    end
-  end
-
-  return merged
-end
-
-local function MergeLegacyState(savedState)
-  local nextState = Core.mergeState(savedState)
-  local legacy = AutoCallboardLegacyDB
-
-  if type(legacy) ~= "table" then
-    return nextState, 0
-  end
-
-  local currentKnown = table.getn(nextState.knownQuests or {})
-  local legacyKnown = table.getn(legacy.knownQuests or {})
-
-  if legacyKnown <= currentKnown then
-    return nextState, 0
-  end
-
-  nextState.knownQuests = Core.mergeKnownQuestLists(nextState.knownQuests, legacy.knownQuests)
-
-  if CountDesiredMap(nextState.desiredQuests) == 0 and CountDesiredMap(legacy.desiredQuests) > 0 then
-    nextState.desiredQuests = Core.copyDesiredMap(legacy.desiredQuests)
-  else
-    nextState.desiredQuests = MergeDesiredMaps(nextState.desiredQuests, legacy.desiredQuests)
-  end
-
-  local legacyProfiles = Core.copyCharacterProfiles(legacy.characterProfiles)
-  nextState.characterProfiles = Core.copyCharacterProfiles(nextState.characterProfiles)
-  for profileKey, profile in pairs(legacyProfiles) do
-    nextState.characterProfiles[profileKey] = nextState.characterProfiles[profileKey] or {}
-    if CountDesiredMap(nextState.characterProfiles[profileKey].desiredQuests) == 0 then
-      nextState.characterProfiles[profileKey].desiredQuests = Core.copyDesiredMap(profile.desiredQuests)
-    else
-      nextState.characterProfiles[profileKey].desiredQuests = MergeDesiredMaps(nextState.characterProfiles[profileKey].desiredQuests, profile.desiredQuests)
-    end
-  end
-
-  return nextState, table.getn(nextState.knownQuests or {}) - currentKnown
-end
-
 local function GetCharacterProfileKey()
   local playerName = UnitName and UnitName("player") or "Unknown"
   local realmName = GetRealmName and GetRealmName() or "UnknownRealm"
@@ -794,35 +724,43 @@ end
 
 local function GetHelpText()
   local lines = {
-    "1. Click " .. HelpName("Quests") .. " first.",
-    "   Check the quests you want AutoCallboard to pick while it rolls.",
-    "   AutoCallboard appears purple in the addon list.",
+    "1. Begin in " .. HelpName("Quests") .. ".",
+    "   Tick the box beside every quest you want the addon to hunt for.",
+    "   Anything ticked is treated as a wanted quest.",
     "",
-    "2. If your quest list is short, give it time.",
-    "   AutoCallboard learns quests as they show up on the Callboard.",
+    "2. A new install starts with a small list.",
+    "   Every quest that appears on the board gets recorded automatically.",
+    "   The list fills out the more you roll.",
+    "   Export/Import can copy the list between installs.",
     "",
-    "3. Click " .. HelpName("Start") .. " when you are ready.",
-    "   Start never summons. It waits for board UI/data, then rolls.",
+    "3. Press " .. HelpName("Start") .. " once your picks are set.",
+    "   Start on its own casts nothing.",
+    "   It sits idle until board data is readable, then begins rerolling.",
     "",
-    "4. Use " .. HelpName("Callboard") .. " when you need to summon a board.",
-    "   At a normal Objectives Board, click the board so AutoCallboard can see it.",
+    "4. Press " .. HelpName("Callboard") .. " whenever no board is up.",
+    "   Standing near a permanent Objectives Board instead?",
+    "   Click that board once so the addon can read its quests.",
     "",
-    "5. When a checked quest shows up, it stops.",
-    "   AutoCallboard selects that quest and waits. Finish the quest, then it can keep going.",
+    "5. Rolling halts the moment a ticked quest lands.",
+    "   The addon grabs that quest for you and pauses itself.",
+    "   Once you've completed it, rolling is ready to resume.",
     "",
-    "6. Click " .. HelpName("Stop") .. " any time you want to quit rolling.",
+    "6. Press " .. HelpName("Stop") .. " whenever you've had enough.",
     "",
-    "7. Be careful with gold.",
-    "   Rerolling costs gold. If you pick rare quests, it can roll many times and the cost can add up fast.",
+    "7. Mind your wallet.",
+    "   Every reroll has a price.",
+    "   Hunting a low-odds quest can burn through dozens of attempts.",
     "",
     "Helpful buttons:",
-    "- " .. HelpName("Callboard") .. ": summons the Callboard. If an Objectives Board is nearby, it opens that first.",
-    "- " .. HelpName("Start") .. ": starts or stops rolling after board access is ready.",
-    "- " .. HelpName("Search") .. ": finds quests by name or quest info.",
-    "- " .. HelpName("Select") .. ": takes one of the three current Callboard quests.",
-    "- " .. HelpName("Export") .. " / " .. HelpName("Import") .. ": moves known quest data to another character.",
-    "- " .. HelpName("/acb sniff on") .. ": records board interaction evidence in the debug window.",
-    "- " .. HelpName("/acb etrace") .. ": opens the client event trace when it is available.",
+    "",
+    "- " .. HelpName("Callboard") .. ": opens a nearby board, or casts the summon.",
+    "- " .. HelpName("Start") .. ": kicks off rolling and flips to Stop while running.",
+    "- " .. HelpName("Share") .. ": pushes your most recently accepted quest again.",
+    "- " .. HelpName("Auto Accept Quests") .. ": accepts quests shared by party or raid members.",
+    "  It does not filter by quest ID or quest name.",
+    "- " .. HelpName("Search") .. ": narrows the known list by title, objective, type, or reward.",
+    "- " .. HelpName("Select") .. ": grabs one of the quests currently showing on the board.",
+    "- " .. HelpName("Export") .. " / " .. HelpName("Import") .. ": copies the learned quest list in or out.",
   }
 
   return table.concat(lines, "\n")
@@ -832,8 +770,8 @@ local function ShowAddonHelp(kind)
   if not helpWindow then
     helpWindow = CreateFrame("Frame", "AutoCallboardHelpWindow", UIParent)
     RegisterSpecialFrame("AutoCallboardHelpWindow")
-    helpWindow:SetWidth(500)
-    helpWindow:SetHeight(470)
+    helpWindow:SetWidth(430)
+    helpWindow:SetHeight(560)
     helpWindow:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     helpWindow:SetFrameStrata("FULLSCREEN_DIALOG")
     if helpWindow.SetToplevel then
@@ -1951,6 +1889,138 @@ function AutoCallboardRuntime.TrackAcceptedQuest(arg1, arg2)
     AutoCallboardRuntime.UpdateShareButtonState()
   end
   AutoCallboardRuntime.ProcessPendingAcceptedQuestShare("QUEST_ACCEPTED")
+end
+
+function AutoCallboardRuntime.GetQuestOfferTitle()
+  if GetTitleText then
+    local ok, value = pcall(GetTitleText)
+    if ok and type(value) == "string" and value ~= "" then
+      return value
+    end
+  end
+
+  if QuestTitleText and QuestTitleText.GetText then
+    return QuestTitleText:GetText() or ""
+  end
+
+  return ""
+end
+
+function AutoCallboardRuntime.GetQuestOfferSourceName()
+  if QuestFrameNpcNameText and QuestFrameNpcNameText.GetText then
+    return QuestFrameNpcNameText:GetText()
+  end
+
+  return nil
+end
+
+function AutoCallboardRuntime.SafeUnitCheck(checker, unit)
+  if not checker or not unit or unit == "" then
+    return false
+  end
+
+  local ok, value = pcall(checker, unit)
+  return ok and value
+end
+
+function AutoCallboardRuntime.IsQuestOfferFromGroupPlayer()
+  local sourceName = AutoCallboardRuntime.GetQuestOfferSourceName()
+  if not sourceName or sourceName == "" then
+    return false, sourceName
+  end
+
+  local isPlayer = AutoCallboardRuntime.SafeUnitCheck(UnitIsPlayer, "questnpc")
+      or AutoCallboardRuntime.SafeUnitCheck(UnitIsPlayer, sourceName)
+  local inGroup = AutoCallboardRuntime.SafeUnitCheck(UnitInParty, "questnpc")
+      or AutoCallboardRuntime.SafeUnitCheck(UnitInRaid, "questnpc")
+      or AutoCallboardRuntime.SafeUnitCheck(UnitInParty, sourceName)
+      or AutoCallboardRuntime.SafeUnitCheck(UnitInRaid, sourceName)
+
+  return isPlayer and inGroup, sourceName
+end
+
+function AutoCallboardRuntime.AcceptCurrentQuestOffer(source)
+  if AcceptQuest then
+    AcceptQuest()
+  elseif QuestFrameAcceptButton then
+    QuestFrameAcceptButton:Click()
+  else
+    AppendDebugLog("quest", "auto accept blocked source=" .. tostring(source) .. " reason=no accept API")
+    return false
+  end
+
+  return true
+end
+
+function AutoCallboardRuntime.TryAutoAcceptSharedQuest(source)
+  if not state or not state.autoAcceptShared then
+    return false
+  end
+
+  local now = GetTime()
+  if AutoCallboardRuntime.lastSharedAutoAcceptAt and now - AutoCallboardRuntime.lastSharedAutoAcceptAt < 0.5 then
+    return false
+  end
+
+  local fromGroupPlayer, sourceName = AutoCallboardRuntime.IsQuestOfferFromGroupPlayer()
+  if not fromGroupPlayer then
+    AppendDebugLog("quest", "shared auto accept skipped source=" .. tostring(source) .. " giver=" .. tostring(sourceName or "none"))
+    return false
+  end
+
+  if AutoCallboardRuntime.AcceptCurrentQuestOffer(source) then
+    AutoCallboardRuntime.lastSharedAutoAcceptAt = now
+    local title = AutoCallboardRuntime.GetQuestOfferTitle()
+    Print("Accepted shared quest" .. (title ~= "" and ": " .. title or "."))
+    AppendDebugLog("quest", "accepted shared quest source=" .. tostring(source) .. " giver=" .. tostring(sourceName or "unknown") .. " title=" .. tostring(title))
+    return true
+  end
+
+  return false
+end
+
+function AutoCallboardRuntime.InstallSharedQuestAutoAcceptHook()
+  if AutoCallboardRuntime.sharedQuestAutoAcceptHooked or not QuestFrame then
+    return
+  end
+
+  AutoCallboardRuntime.sharedQuestAutoAcceptHooked = true
+
+  if QuestFrame.HookScript then
+    QuestFrame:HookScript("OnShow", function()
+      AutoCallboardRuntime.TryAutoAcceptSharedQuest("QuestFrame OnShow")
+      end)
+    return
+  end
+
+  if QuestFrame.GetScript and QuestFrame.SetScript then
+    local previousOnShow = QuestFrame:GetScript("OnShow")
+    QuestFrame:SetScript("OnShow", function(self, ...)
+      if previousOnShow then
+        previousOnShow(self, ...)
+      end
+
+      AutoCallboardRuntime.TryAutoAcceptSharedQuest("QuestFrame OnShow")
+      end)
+  end
+end
+
+function AutoCallboardRuntime.ConfirmSharedQuestAccept(source)
+  if not state or not state.autoAcceptShared then
+    return false
+  end
+
+  if StaticPopup_Visible and StaticPopup_Visible("QUEST_ACCEPT") and StaticPopup_Hide then
+    StaticPopup_Hide("QUEST_ACCEPT")
+  end
+
+  if ConfirmAcceptQuest then
+    ConfirmAcceptQuest()
+    AppendDebugLog("quest", "confirmed shared quest source=" .. tostring(source))
+    return true
+  end
+
+  return false
 end
 
 local function IsSelectedQuestDone()
@@ -3506,6 +3576,16 @@ function AutoCallboardRuntime.UpdateShareButtonState()
   end
 end
 
+function AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
+  local checkbox = AutoCallboardRuntime.autoAcceptSharedCheckbox
+  if not checkbox then
+    return
+  end
+
+  checkbox:SetChecked(state and state.autoAcceptShared)
+  SetCheckboxVisual(checkbox)
+end
+
 local function RefreshRollButtonMacroState(target)
   if not target or not target._acbRollToggle or not target.SetAttribute then
     return
@@ -3738,6 +3818,7 @@ UpdateQuestWindow = function()
 
   UpdateRollToggleButtonState(startRollButton, desiredCount > 0 and service ~= nil)
   UpdateRollToggleButtonState(controlFrame and controlFrame.startButton or nil, true)
+  AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
 
   if questStatusText then
     local summonSummary = ""
@@ -4074,6 +4155,30 @@ function AutoCallboardRuntime.CreateQuestWindow()
     questSearchBox:ClearFocus()
     end)
 
+  AutoCallboardRuntime.autoAcceptSharedCheckbox = CreateFrame("CheckButton", nil, questWindow)
+  AutoCallboardRuntime.autoAcceptSharedCheckbox:SetPoint("TOPRIGHT", questWindow, "TOPRIGHT", -24, -178)
+  SkinCheckbox(AutoCallboardRuntime.autoAcceptSharedCheckbox)
+  AutoCallboardRuntime.autoAcceptSharedCheckbox:SetScript("OnClick", function(self)
+    AutoCallboardRuntime.SetField("autoAcceptShared", self:GetChecked() and true or false)
+    end)
+  AutoCallboardRuntime.autoAcceptSharedCheckbox:SetScript("OnEnter", function(self)
+    SetCheckboxVisual(self, "hover")
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Auto Accept Quests")
+    GameTooltip:AddLine("Automatically accepts quests shared by party or raid members.", 1, 1, 1)
+    GameTooltip:Show()
+    end)
+  AutoCallboardRuntime.autoAcceptSharedCheckbox:SetScript("OnLeave", function(self)
+    SetCheckboxVisual(self)
+    GameTooltip:Hide()
+    end)
+
+  local autoAcceptSharedLabel = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  autoAcceptSharedLabel:SetPoint("RIGHT", AutoCallboardRuntime.autoAcceptSharedCheckbox, "LEFT", -8, 0)
+  autoAcceptSharedLabel:SetText("Auto Accept Quests")
+  SkinMutedText(autoAcceptSharedLabel)
+  AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
+
   knownPageText = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   knownPageText:SetPoint("TOPLEFT", questWindow, "TOPLEFT", 24, -216)
   knownPageText:SetWidth(QUEST_WINDOW_WIDTH - 62)
@@ -4119,24 +4224,13 @@ function AutoCallboardRuntime.CreateQuestWindow()
     knownQuestRows[i]:SetPoint("TOPLEFT", knownPageText, "BOTTOMLEFT", 0, -10 - ((i - 1) * QUEST_ROW_HEIGHT))
   end
 
-  local questToolbarWidth = 72 + 8 + 72 + 8 + 54 + 8 + 66 + 8 + 66
-
-  refreshQuestButton = CreateFrame("Button", nil, questWindow, "UIPanelButtonTemplate")
-  refreshQuestButton:SetWidth(72)
-  refreshQuestButton:SetHeight(24)
-  refreshQuestButton:SetText("Refresh")
-  refreshQuestButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOM", -(questToolbarWidth / 2), 46)
-  SkinButton(refreshQuestButton)
-  refreshQuestButton:SetScript("OnClick", function()
-    CaptureCurrentObjectives()
-    UpdateQuestWindow()
-    end)
+  local questToolbarWidth = 72 + 8 + 54 + 8 + 66 + 8 + 66
 
   startRollButton = CreateFrame("Button", nil, questWindow, "SecureActionButtonTemplate,UIPanelButtonTemplate")
   startRollButton:SetWidth(72)
   startRollButton:SetHeight(24)
   startRollButton:SetText("Start")
-  startRollButton:SetPoint("LEFT", refreshQuestButton, "RIGHT", 8, 0)
+  startRollButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOM", -(questToolbarWidth / 2), 46)
   SkinButton(startRollButton)
   AutoCallboardRuntime.ConfigureStartButton(startRollButton)
   UpdateRollToggleButtonState(startRollButton, IsQuestRollStartAvailable())
@@ -4634,7 +4728,7 @@ local function ShowHelp()
   ShowAddonHelp("main")
 end
 
-local function SetField(field, value)
+function AutoCallboardRuntime.SetField(field, value)
   local nextState = Core.mergeState(state)
   nextState[field] = value
   ApplyState(nextState)
@@ -4654,6 +4748,8 @@ local function SetField(field, value)
     Print("Objective button field set to " .. value .. ".")
   elseif field == "autoAccept" then
     Print("Quest auto-accept is " .. (value and "on" or "off") .. ".")
+  elseif field == "autoAcceptShared" then
+    Print("Auto Accept Quests is " .. (value and "on" or "off") .. ".")
   elseif field == "autoSelect" then
     Print("Quest auto-select is " .. (value and "on" or "off") .. ".")
   elseif field == "maxRerolls" then
@@ -4690,7 +4786,7 @@ local function HandleSlash(input)
     controlFrame:Show()
     Print("Settings reset.")
   elseif parsed.kind == "set" then
-    SetField(parsed.field, parsed.value)
+    AutoCallboardRuntime.SetField(parsed.field, parsed.value)
   elseif parsed.kind == "reroll" then
     ClickReroll()
   elseif parsed.kind == "objective" then
@@ -5034,14 +5130,14 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
   end
 
   if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
-    local mergedState, migratedLegacyQuestCount = MergeLegacyState(AutoCallboardDB)
-    ApplyState(mergedState)
+    ApplyState(AutoCallboardDB)
     ApplyCharacterProfile()
     EnsureDebugLog()
     if AutoCallboardRuntime.IsInteractionSnifferEnabled() then
       AutoCallboardRuntime.InstallInteractionSnifferHooks()
       AppendDebugLog("sniff", "interaction sniffer restored after load")
     end
+    AutoCallboardRuntime.InstallSharedQuestAutoAcceptHook()
     CreateCallboardButton()
     CreateMinimapButton()
 
@@ -5051,10 +5147,6 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 
     Print("Loaded. Use /acb help.")
     AppendDebugLog("load", "AutoCallboard loaded")
-    if migratedLegacyQuestCount > 0 then
-      Print("Restored " .. tostring(migratedLegacyQuestCount) .. " Callboard quest(s) from the ProjectCallboard data.")
-      AppendDebugLog("migration", "restored legacy known quests count=" .. tostring(migratedLegacyQuestCount))
-    end
   elseif event == "GOSSIP_SHOW" then
     local npcName = GossipFrameNpcNameText and GossipFrameNpcNameText:GetText()
     local npcBoard = AutoCallboardRuntime.GetNpcBoardInfo and AutoCallboardRuntime.GetNpcBoardInfo() or nil
@@ -5072,7 +5164,11 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
       elseif QuestFrameAcceptButton then
         QuestFrameAcceptButton:Click()
       end
+    else
+      AutoCallboardRuntime.TryAutoAcceptSharedQuest(event)
     end
+  elseif event == "QUEST_ACCEPT_CONFIRM" then
+    AutoCallboardRuntime.ConfirmSharedQuestAccept(event)
   elseif event == "QUEST_TURNED_IN" then
     local questID = tonumber(arg1) or 0
 
@@ -5110,6 +5206,7 @@ frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
 
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("QUEST_DETAIL")
+frame:RegisterEvent("QUEST_ACCEPT_CONFIRM")
 frame:RegisterEvent("QUEST_ACCEPTED")
 frame:RegisterEvent("QUEST_LOG_UPDATE")
 frame:RegisterEvent("QUEST_GREETING")

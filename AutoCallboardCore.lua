@@ -10,6 +10,7 @@ local DEFAULTS = {
     objectivePrefix = "ObjectiveFrame",
     objectiveButtonField = "selectBtn",
     autoAccept = true,
+    autoAcceptShared = false,
     autoSelect = false,
     maxRerolls = 50,
     rerollDelay = 1.6,
@@ -54,6 +55,7 @@ local function copyDefaults()
         objectivePrefix = DEFAULTS.objectivePrefix,
         objectiveButtonField = DEFAULTS.objectiveButtonField,
         autoAccept = DEFAULTS.autoAccept,
+        autoAcceptShared = DEFAULTS.autoAcceptShared,
         autoSelect = DEFAULTS.autoSelect,
         maxRerolls = DEFAULTS.maxRerolls,
         rerollDelay = DEFAULTS.rerollDelay,
@@ -125,6 +127,12 @@ function Core.mergeState(saved)
 
     if type(saved.autoAccept) == "boolean" then
         state.autoAccept = saved.autoAccept
+    end
+
+    if type(saved.autoAcceptShared) == "boolean" then
+        state.autoAcceptShared = saved.autoAcceptShared
+    elseif type(saved.autoAcceptSharedBoard) == "boolean" then
+        state.autoAcceptShared = saved.autoAcceptSharedBoard
     end
 
     if type(saved.autoSelect) == "boolean" then
@@ -305,6 +313,21 @@ function Core.parseSlash(input)
         end
 
         return { kind = "invalid", message = "Usage: /acb accept on, or /acb accept off" }
+    end
+
+    if command == "autoacceptquests" or command == "autoacceptquest"
+            or command == "shareaccept" or command == "sharedaccept" or command == "acceptshared" then
+        local lowered = rest:lower()
+
+        if lowered == "on" or lowered == "true" or lowered == "yes" then
+            return { kind = "set", field = "autoAcceptShared", value = true }
+        end
+
+        if lowered == "off" or lowered == "false" or lowered == "no" then
+            return { kind = "set", field = "autoAcceptShared", value = false }
+        end
+
+        return { kind = "invalid", message = "Usage: /acb autoacceptquests on, or /acb autoacceptquests off" }
     end
 
     if command == "quests" or command == "quest" then
