@@ -1,0 +1,27 @@
+name: README badges
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard-readme-badges:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Require stable README badges
+        shell: pwsh
+        run: |
+          $readme = Get-Content -Raw README.md
+
+          if ($readme -match 'img\.shields\.io/github/') {
+            Write-Error 'README.md must not use GitHub-backed Shields.io badges. Use static Shields badges instead.'
+            exit 1
+          }
+
+          if ($readme -notmatch '\[!\[Downloads\]\(https://img\.shields\.io/badge/downloads-\d+-b048f8\.svg\?style=for-the-badge\)\]\(https://github\.com/disarrayed/AutoCallboard/releases\)') {
+            Write-Error 'README.md must show a static numeric Downloads badge linked to the releases page.'
+            exit 1
+          }
