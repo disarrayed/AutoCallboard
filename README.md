@@ -5,8 +5,8 @@
 Automatic Callboard rolling for Project Ebonhold. Pick the quests you want,
 open a board, and let AutoCallboard stop when one appears.
 
-[![Latest release](https://img.shields.io/github/v/release/disarrayed/AutoCallboard.svg?style=for-the-badge&color=4b2e83)](https://github.com/disarrayed/AutoCallboard/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/disarrayed/AutoCallboard/total.svg?label=downloads&style=for-the-badge&color=b048f8)](https://github.com/disarrayed/AutoCallboard/releases)
+[![Download latest](https://img.shields.io/badge/download-latest-b048f8.svg?style=for-the-badge)](https://github.com/disarrayed/AutoCallboard/releases/latest)
+![AutoCallboard 1.0.3](https://img.shields.io/badge/AutoCallboard-1.0.3-4b2e83.svg?style=for-the-badge)
 ![Project Ebonhold 3.3.5a](https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-d1d1f6.svg?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoCallboard/releases/latest) · [**Source**](https://github.com/disarrayed/AutoCallboard)
