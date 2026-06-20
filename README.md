@@ -5,8 +5,8 @@
 Automatic Callboard rolling for Project Ebonhold. Pick the quests you want,
 open a board, and let AutoCallboard stop when one appears.
 
-[![Downloads](https://img.shields.io/badge/downloads-75-b048f8.svg?style=for-the-badge)](https://github.com/disarrayed/AutoCallboard/releases)
-![AutoCallboard 1.0.3](https://img.shields.io/badge/AutoCallboard-1.0.3-4b2e83.svg?style=for-the-badge)
+[![Downloads](https://img.shields.io/badge/downloads-214-b048f8.svg?style=for-the-badge)](https://github.com/disarrayed/AutoCallboard/releases)
+![AutoCallboard 1.0.4](https://img.shields.io/badge/AutoCallboard-1.0.4-4b2e83.svg?style=for-the-badge)
 ![Project Ebonhold 3.3.5a](https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-d1d1f6.svg?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoCallboard/releases/latest) · [**Source**](https://github.com/disarrayed/AutoCallboard)
@@ -39,7 +39,7 @@ Use the `Callboard` button when you need to summon a board. At a normal
 `Objectives Board`, click the board to open it. `Start` does not summon, and it
 will not reroll or select from cached data if no board is open.
 
-Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, and the cost can add up fast.
+Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, and the cost can add up fast. The quest panel tracks total spend, current run spend, and the last accepted quest cost, and accepted quest chat output includes the spend for that quest.
 
 ---
 
@@ -49,6 +49,8 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 - Pick wanted quests from the `Quests` panel
 - Wanted picks save per character
 - Known quest list grows as quests appear on the Callboard
+- Known quests are split by quest type
+- Category filters can quickly show only Open World, Dungeon, Raid, Profession, or Other quests
 - Search by quest name or quest info
 - Hover a quest to see the quest details
 
@@ -57,6 +59,7 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 - `Start` does not summon the Callboard
 - `Start` will not spend a reroll unless board access is detected through UI, board gossip, or the clicked board's `npc` token/object ID
 - `Share` retries the last accepted quest from your quest log
+- Accepted quest chat output shows how much gold that quest cost
 - `Auto Accept Quests` can accept quests shared by party or raid members
 - Auto Accept Quests is separate from board quest auto-accept
 - Auto Accept Quests does not rely on fixed quest IDs or titles

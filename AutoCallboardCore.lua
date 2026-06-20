@@ -17,11 +17,17 @@ local DEFAULTS = {
     knownQuests = {},
     desiredQuests = {},
     characterProfiles = {},
+    questPanelExpanded = false,
     debug = {
         enabled = false,
         mouseWatch = false,
         sniffer = false,
         maxLog = 120,
+    },
+    goldTracker = {
+        totalSpent = 0,
+        trackedQuestCount = 0,
+        lastQuestSpent = 0,
     },
     buttonShown = true,
     button = {
@@ -62,11 +68,17 @@ local function copyDefaults()
         knownQuests = {},
         desiredQuests = {},
         characterProfiles = {},
+        questPanelExpanded = DEFAULTS.questPanelExpanded,
         debug = {
             enabled = DEFAULTS.debug.enabled,
             mouseWatch = DEFAULTS.debug.mouseWatch,
             sniffer = DEFAULTS.debug.sniffer,
             maxLog = DEFAULTS.debug.maxLog,
+        },
+        goldTracker = {
+            totalSpent = DEFAULTS.goldTracker.totalSpent,
+            trackedQuestCount = DEFAULTS.goldTracker.trackedQuestCount,
+            lastQuestSpent = DEFAULTS.goldTracker.lastQuestSpent,
         },
         buttonShown = DEFAULTS.buttonShown,
         button = {
@@ -159,6 +171,10 @@ function Core.mergeState(saved)
         state.characterProfiles = Core.copyCharacterProfiles(saved.characterProfiles)
     end
 
+    if type(saved.questPanelExpanded) == "boolean" then
+        state.questPanelExpanded = saved.questPanelExpanded
+    end
+
     if type(saved.debug) == "table" then
         if type(saved.debug.enabled) == "boolean" then
             state.debug.enabled = saved.debug.enabled
@@ -174,6 +190,20 @@ function Core.mergeState(saved)
 
         if type(saved.debug.maxLog) == "number" and saved.debug.maxLog >= 20 then
             state.debug.maxLog = saved.debug.maxLog
+        end
+    end
+
+    if type(saved.goldTracker) == "table" then
+        if type(saved.goldTracker.totalSpent) == "number" and saved.goldTracker.totalSpent >= 0 then
+            state.goldTracker.totalSpent = math.floor(saved.goldTracker.totalSpent)
+        end
+
+        if type(saved.goldTracker.trackedQuestCount) == "number" and saved.goldTracker.trackedQuestCount >= 0 then
+            state.goldTracker.trackedQuestCount = math.floor(saved.goldTracker.trackedQuestCount)
+        end
+
+        if type(saved.goldTracker.lastQuestSpent) == "number" and saved.goldTracker.lastQuestSpent >= 0 then
+            state.goldTracker.lastQuestSpent = math.floor(saved.goldTracker.lastQuestSpent)
         end
     end
 
@@ -531,6 +561,27 @@ function Core.copyDesiredMap(desired)
     end
 
     return copy
+end
+
+function Core.questMatchesTypeFilter(quest, enabledQuestTypes)
+    if type(enabledQuestTypes) ~= "table" then
+        return true
+    end
+
+    local hasEnabledFilter = false
+    for _, enabled in pairs(enabledQuestTypes) do
+        if enabled == true then
+            hasEnabledFilter = true
+            break
+        end
+    end
+
+    if not hasEnabledFilter then
+        return true
+    end
+
+    local questType = tonumber(quest and quest.questType) or 0
+    return enabledQuestTypes[questType] == true
 end
 
 function Core.copyCharacterProfiles(profiles)

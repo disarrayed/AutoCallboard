@@ -21,8 +21,6 @@ local questWindow
 local currentQuestRows = {}
 local knownQuestRows = {}
 local questStatusText
-local startRollButton
-local knownPageText
 local knownScrollFrame
 local questSearchBox
 local questSearchText = ""
@@ -64,7 +62,7 @@ local ACCEPT_WINDOW = 12
 local ACCEPTED_QUEST_SHARE_TIMEOUT = 8
 local ACCEPTED_QUEST_SHARE_RETRY_INTERVAL = 0.35
 local DEBUG_PROBE_INTERVAL = 0.25
-local KNOWN_ROWS = 10
+local KNOWN_ROWS = 8
 local QUEST_ROW_HEIGHT = 28
 local QUEST_WINDOW_WIDTH = 620
 local CURRENT_QUEST_ROW_WIDTH = 570
@@ -121,6 +119,90 @@ local function GetAddonVersion()
   end
 
   return "unknown"
+end
+
+local function NormalizeCopper(value)
+  value = tonumber(value) or 0
+  if value < 0 then
+    value = 0
+  end
+
+  return math.floor(value)
+end
+
+local function FormatMoney(copper)
+  copper = NormalizeCopper(copper)
+
+  local gold = math.floor(copper / 10000)
+  local silver = math.floor((copper % 10000) / 100)
+  local coin = copper % 100
+  local parts = {}
+
+  if gold > 0 then
+    table.insert(parts, tostring(gold) .. "g")
+  end
+
+  if silver > 0 or gold > 0 then
+    table.insert(parts, tostring(silver) .. "s")
+  end
+
+  table.insert(parts, tostring(coin) .. "c")
+
+  return table.concat(parts, " ")
+end
+
+local function GetGoldTrackerState()
+  if not state then
+    return nil
+  end
+
+  state.goldTracker = state.goldTracker or {
+    totalSpent = 0,
+    trackedQuestCount = 0,
+    lastQuestSpent = 0,
+  }
+
+  return state.goldTracker
+end
+
+local function SaveGoldTrackerState(totalSpent, trackedQuestCount, lastQuestSpent)
+  local nextState = Core.mergeState(state)
+  nextState.goldTracker.totalSpent = NormalizeCopper(totalSpent)
+  nextState.goldTracker.trackedQuestCount = math.max(0, math.floor(tonumber(trackedQuestCount) or 0))
+  nextState.goldTracker.lastQuestSpent = NormalizeCopper(lastQuestSpent)
+  state = nextState
+  AutoCallboardDB = state
+end
+
+local function SyncGoldTracker()
+  if not GetMoney or not state or AutoCallboardRuntime.trackedGoldAt == nil then
+    return 0
+  end
+
+  local currentMoney = NormalizeCopper(GetMoney())
+  local delta = AutoCallboardRuntime.trackedGoldAt - currentMoney
+  if delta > 0 then
+    local tracker = GetGoldTrackerState()
+    AutoCallboardRuntime.trackedQuestSpend = (AutoCallboardRuntime.trackedQuestSpend or 0) + delta
+    SaveGoldTrackerState((tracker.totalSpent or 0) + delta, tracker.trackedQuestCount or 0, tracker.lastQuestSpent or 0)
+  end
+
+  AutoCallboardRuntime.trackedGoldAt = currentMoney
+  return math.max(delta, 0)
+end
+
+local function FinalizeTrackedQuestSpend()
+  local tracker = GetGoldTrackerState()
+  if not tracker then
+    return 0
+  end
+
+  local spent = NormalizeCopper(AutoCallboardRuntime.trackedQuestSpend or 0)
+  local questCount = (tracker.trackedQuestCount or 0) + 1
+
+  SaveGoldTrackerState(tracker.totalSpent or 0, questCount, spent)
+  AutoCallboardRuntime.trackedQuestSpend = 0
+  return spent
 end
 
 local function ApplyColor(target, methodName, color)
@@ -633,6 +715,7 @@ local UpdateRollToggleButtons
 local StopRolling
 local TargetCallboard
 local ClearRollPause
+local ConfigureKnownQuestRow
 
 function AutoCallboardRuntime.GetSummonMacroText()
   if state and state.summonSpell and state.summonSpell ~= "" then
@@ -653,6 +736,28 @@ local function ApplyState(nextState)
   if minimapButton then
     PositionMinimapButton()
   end
+end
+
+function AutoCallboardRuntime.SaveQuestPanelExpanded(expanded)
+  if not state or state.questPanelExpanded == expanded then
+    return
+  end
+
+  local nextState = Core.mergeState(state)
+  nextState.questPanelExpanded = expanded and true or false
+  state = nextState
+  AutoCallboardDB = state
+end
+
+function AutoCallboardRuntime.SaveControlFrameShown(shown)
+  if not state or state.buttonShown == shown then
+    return
+  end
+
+  local nextState = Core.mergeState(state)
+  nextState.buttonShown = shown and true or false
+  state = nextState
+  AutoCallboardDB = state
 end
 
 local function GetCharacterProfileKey()
@@ -730,7 +835,7 @@ local function GetHelpText()
     "",
     "2. A new install starts with a small list.",
     "   Every quest that appears on the board gets recorded automatically.",
-    "   The list fills out the more you roll.",
+    "   The list fills out the more you roll and stays split by quest type.",
     "   Export/Import can copy the list between installs.",
     "",
     "3. Press " .. HelpName("Start") .. " once your picks are set.",
@@ -750,12 +855,14 @@ local function GetHelpText()
     "7. Mind your wallet.",
     "   Every reroll has a price.",
     "   Hunting a low-odds quest can burn through dozens of attempts.",
+    "   The quest panel tracks total spend, current run spend, and the last accepted quest cost.",
     "",
     "Helpful buttons:",
     "",
     "- " .. HelpName("Callboard") .. ": opens a nearby board, or casts the summon.",
     "- " .. HelpName("Start") .. ": kicks off rolling and flips to Stop while running.",
     "- " .. HelpName("Share") .. ": pushes your most recently accepted quest again.",
+    "- Accepted quest chat output includes the gold spent to land that quest.",
     "- " .. HelpName("Auto Accept Quests") .. ": accepts quests shared by party or raid members.",
     "  It does not filter by quest ID or quest name.",
     "- " .. HelpName("Search") .. ": narrows the known list by title, objective, type, or reward.",
@@ -1841,6 +1948,7 @@ function AutoCallboardRuntime.ProcessPendingAcceptedQuestShare(source)
 end
 
 function AutoCallboardRuntime.TrackAcceptedQuest(arg1, arg2)
+  SyncGoldTracker()
   local first = tonumber(arg1)
   local second = tonumber(arg2)
   local questLogIndex = second and first or nil
@@ -1883,8 +1991,10 @@ function AutoCallboardRuntime.TrackAcceptedQuest(arg1, arg2)
     nextAttemptAt = nil,
   }
 
-  Print("Accepted quest: " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest))
-  AppendDebugLog("quest", "accepted " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest) .. " index=" .. tostring(questLogIndex or "unknown"))
+  local spent = FinalizeTrackedQuestSpend()
+  AutoCallboardRuntime.trackedGoldAt = nil
+  Print("Accepted quest: " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest) .. " | spent " .. FormatMoney(spent))
+  AppendDebugLog("quest", "accepted " .. AutoCallboardRuntime.QuestShareLabel(AutoCallboardRuntime.lastAcceptedQuest) .. " index=" .. tostring(questLogIndex or "unknown") .. " spent=" .. tostring(spent))
   if AutoCallboardRuntime.UpdateShareButtonState then
     AutoCallboardRuntime.UpdateShareButtonState()
   end
@@ -2182,6 +2292,8 @@ StopRolling = function(message)
   pendingReroll = false
   nextRollAt = nil
   pendingRerollUntil = nil
+  AutoCallboardRuntime.trackedGoldAt = nil
+  AutoCallboardRuntime.trackedQuestSpend = 0
   selectedQuest = nil
   nextSelectedQuestCheckAt = nil
   AutoCallboardRuntime.blockedMatchKey = nil
@@ -2406,6 +2518,7 @@ local function ProcessRolling()
   end
 
   local now = GetTime()
+  SyncGoldTracker()
   local objectives = GetCurrentObjectives()
   local signature = ObjectiveSignature(objectives)
 
@@ -2504,6 +2617,8 @@ StartRolling = function()
   end
 
   rollCount = 0
+  AutoCallboardRuntime.trackedQuestSpend = 0
+  AutoCallboardRuntime.trackedGoldAt = GetMoney and NormalizeCopper(GetMoney()) or nil
   selectedQuest = nil
   rollPausedReason = nil
   rollPauseMessage = nil
@@ -3405,6 +3520,38 @@ local QUEST_TYPE_NAMES = {
   [4] = "Profession",
 }
 
+AutoCallboardRuntime.questTypeFilterOptions = {
+  { questType = 1, label = "Open World" },
+  { questType = 2, label = "Dungeon" },
+  { questType = 3, label = "Raid" },
+  { questType = 4, label = "Profession" },
+  { questType = 0, label = "Other" },
+}
+AutoCallboardRuntime.knownQuestTypeButtons = AutoCallboardRuntime.knownQuestTypeButtons or {}
+AutoCallboardRuntime.knownQuestTypeFilters = AutoCallboardRuntime.knownQuestTypeFilters or {}
+
+local function GetQuestTypeName(questType)
+  questType = tonumber(questType) or 0
+  return QUEST_TYPE_NAMES[questType] or "Other"
+end
+
+local function CompareKnownQuests(left, right)
+  local leftType = tonumber(left and left.questType) or 999
+  local rightType = tonumber(right and right.questType) or 999
+
+  if leftType ~= rightType then
+    return leftType < rightType
+  end
+
+  local leftTitle = string.lower(Core.questTitle(left))
+  local rightTitle = string.lower(Core.questTitle(right))
+  if leftTitle ~= rightTitle then
+    return leftTitle < rightTitle
+  end
+
+  return (tonumber(left and left.questId) or 0) < (tonumber(right and right.questId) or 0)
+end
+
 local function QuestMatchesSearch(quest, query)
   if not query or query == "" then
     return true
@@ -3421,7 +3568,7 @@ local function QuestMatchesSearch(quest, query)
     tostring(quest.questId or ""),
     tostring(quest.zoneOrSort or ""),
     tostring(quest.questType or ""),
-    questType and QUEST_TYPE_NAMES[questType] or "",
+    questType and GetQuestTypeName(questType) or "",
     tostring(quest.normalXp or ""),
     tostring(quest.hc1Xp or ""),
     tostring(quest.hc2Xp or ""),
@@ -3444,17 +3591,105 @@ local function QuestMatchesSearch(quest, query)
   return string.find(haystack, needle, 1, true) ~= nil
 end
 
+function AutoCallboardRuntime.CountActiveQuestTypeFilters()
+  local count = 0
+  local lastQuestType = nil
+
+  for questType, enabled in pairs(AutoCallboardRuntime.knownQuestTypeFilters or {}) do
+    if enabled == true then
+      count = count + 1
+      lastQuestType = questType
+    end
+  end
+
+  return count, lastQuestType
+end
+
+function AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
+  local count = AutoCallboardRuntime.CountActiveQuestTypeFilters()
+  local names = {}
+
+  if count == 0 then
+    return names
+  end
+
+  for i = 1, table.getn(AutoCallboardRuntime.questTypeFilterOptions) do
+    local option = AutoCallboardRuntime.questTypeFilterOptions[i]
+    if AutoCallboardRuntime.knownQuestTypeFilters[option.questType] == true then
+      table.insert(names, option.label)
+    end
+  end
+
+  return names
+end
+
+function AutoCallboardRuntime.SyncKnownQuestTypeButtons()
+  local activeCount = AutoCallboardRuntime.CountActiveQuestTypeFilters()
+  local showAll = activeCount == 0
+
+  for i = 1, table.getn(AutoCallboardRuntime.knownQuestTypeButtons) do
+    local checkbox = AutoCallboardRuntime.knownQuestTypeButtons[i]
+    local isChecked = showAll or AutoCallboardRuntime.knownQuestTypeFilters[checkbox._acbQuestType] == true
+
+    checkbox:SetChecked(isChecked)
+    SetCheckboxVisual(checkbox)
+  end
+end
+
+function AutoCallboardRuntime.SetKnownQuestTypeFilter(questType)
+  local activeCount, lastQuestType = AutoCallboardRuntime.CountActiveQuestTypeFilters()
+
+  if activeCount == 1 and lastQuestType == questType then
+    AutoCallboardRuntime.knownQuestTypeFilters = {}
+  else
+    AutoCallboardRuntime.knownQuestTypeFilters = {
+      [questType] = true,
+    }
+  end
+
+  AutoCallboardRuntime.SyncKnownQuestTypeButtons()
+  SetKnownScrollOffset(0)
+end
+
 local function FilterKnownQuests()
   local filtered = {}
   local quests = state and state.knownQuests or {}
 
   for i = 1, table.getn(quests) do
-    if QuestMatchesSearch(quests[i], questSearchText) then
+    if Core.questMatchesTypeFilter(quests[i], AutoCallboardRuntime.knownQuestTypeFilters) and QuestMatchesSearch(quests[i], questSearchText) then
       table.insert(filtered, quests[i])
     end
   end
 
   return filtered
+end
+
+local function BuildKnownQuestEntries()
+  local filtered = FilterKnownQuests()
+  table.sort(filtered, CompareKnownQuests)
+
+  local entries = {}
+  local lastTypeName = nil
+
+  for i = 1, table.getn(filtered) do
+    local quest = filtered[i]
+    local typeName = GetQuestTypeName(quest and quest.questType)
+
+    if typeName ~= lastTypeName then
+      table.insert(entries, {
+        kind = "header",
+        title = typeName,
+      })
+      lastTypeName = typeName
+    end
+
+    table.insert(entries, {
+      kind = "quest",
+      quest = quest,
+    })
+  end
+
+  return entries, filtered
 end
 
 local function AddRewardLine(label, xp, soulAshes)
@@ -3523,7 +3758,7 @@ local function ShowQuestTooltip(owner, quest, sourceLabel)
 
   local questType = tonumber(quest.questType)
   if questType and questType > 0 then
-    GameTooltip:AddDoubleLine("Type", QUEST_TYPE_NAMES[questType] or tostring(questType), 0.8, 0.8, 0.8, 1, 1, 1)
+    GameTooltip:AddDoubleLine("Type", GetQuestTypeName(questType), 0.8, 0.8, 0.8, 1, 1, 1)
   end
 
   if tonumber(quest.zoneOrSort) and tonumber(quest.zoneOrSort) > 0 then
@@ -3632,7 +3867,7 @@ UpdateRollToggleButtons = function()
     UpdateRollToggleButtonState(controlFrame.startButton, true)
   end
 
-  UpdateRollToggleButtonState(startRollButton, IsQuestRollStartAvailable())
+  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, IsQuestRollStartAvailable())
 end
 
 function AutoCallboardRuntime.ApplySecureMacroButtonAttributes(target, macroText, label)
@@ -3696,7 +3931,8 @@ function AutoCallboardRuntime.ConfigureStartButton(target)
 end
 
 local function GetKnownMaxScrollOffset()
-  local knownCount = table.getn(FilterKnownQuests())
+  local entries = BuildKnownQuestEntries()
+  local knownCount = table.getn(entries)
 
   return math.max(0, knownCount - KNOWN_ROWS)
 end
@@ -3750,10 +3986,11 @@ UpdateQuestWindow = function()
     end
   end
 
-  local filteredKnownQuests = FilterKnownQuests()
+  local knownEntries, filteredKnownQuests = BuildKnownQuestEntries()
   local totalKnownCount = table.getn(state.knownQuests or {})
   local knownCount = table.getn(filteredKnownQuests)
-  local maxOffset = math.max(0, knownCount - KNOWN_ROWS)
+  local displayCount = table.getn(knownEntries)
+  local maxOffset = math.max(0, displayCount - KNOWN_ROWS)
 
   if knownScrollOffset > maxOffset then
     knownScrollOffset = maxOffset
@@ -3783,40 +4020,49 @@ UpdateQuestWindow = function()
     end
   elseif knownScrollFrame and FauxScrollFrame_Update and FauxScrollFrame_GetOffset then
     knownScrollFrame.offset = knownScrollOffset
-    FauxScrollFrame_Update(knownScrollFrame, knownCount, KNOWN_ROWS, QUEST_ROW_HEIGHT)
+    FauxScrollFrame_Update(knownScrollFrame, displayCount, KNOWN_ROWS, QUEST_ROW_HEIGHT)
     knownScrollOffset = FauxScrollFrame_GetOffset(knownScrollFrame)
   end
 
   local offset = knownScrollOffset
   for i = 1, KNOWN_ROWS do
     local row = knownQuestRows[i]
-    local quest = filteredKnownQuests[offset + i]
+    local entry = knownEntries[offset + i]
 
-    if row and quest then
-      local wanted = quest.key and state.desiredQuests and state.desiredQuests[quest.key] == true
-      row.quest = quest
-      row.key = quest.key
-      row.title:SetText(QuestLabel(quest))
-      row.checkbox:SetChecked(wanted)
-      SetCheckboxVisual(row.checkbox)
-      row.title:SetTextColor(wanted and THEME.good[1] or THEME.gold[1], wanted and THEME.good[2] or THEME.gold[2], wanted and THEME.good[3] or THEME.gold[3])
-      row:Show()
-    elseif row then
-      row.quest = nil
-      row.key = nil
-      row:Hide()
+    if row then
+      ConfigureKnownQuestRow(row, entry)
     end
   end
 
-  if knownPageText then
-    if questSearchText ~= "" then
-      knownPageText:SetText("Check the quests you want to AutoRoll | Known: " .. tostring(totalKnownCount) .. " | Matches: " .. tostring(knownCount))
+  if AutoCallboardRuntime.knownPageText then
+    local summary = "Check the quests you want to AutoRoll | Known: " .. tostring(totalKnownCount)
+    local activeTypeNames = AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
+
+    if questSearchText ~= "" or table.getn(activeTypeNames) > 0 then
+      summary = summary .. " | Matches: " .. tostring(knownCount)
+    end
+
+    if table.getn(activeTypeNames) > 0 then
+      summary = summary .. " | Showing: " .. table.concat(activeTypeNames, ", ")
     else
-      knownPageText:SetText("Check the quests you want to AutoRoll | Known: " .. tostring(totalKnownCount))
+      summary = summary .. " | Types split"
     end
+
+    AutoCallboardRuntime.knownPageText:SetText(summary)
   end
 
-  UpdateRollToggleButtonState(startRollButton, desiredCount > 0 and service ~= nil)
+  AutoCallboardRuntime.SyncKnownQuestTypeButtons()
+
+  if AutoCallboardRuntime.questGoldText then
+    local tracker = GetGoldTrackerState()
+    local totalSpent = tracker and tracker.totalSpent or 0
+    local lastQuestSpent = tracker and tracker.lastQuestSpent or 0
+    local currentSpend = AutoCallboardRuntime.trackedQuestSpend or 0
+
+    AutoCallboardRuntime.questGoldText:SetText("Gold spent | total " .. FormatMoney(totalSpent) .. " | last quest " .. FormatMoney(lastQuestSpent) .. " | current run " .. FormatMoney(currentSpend))
+  end
+
+  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, desiredCount > 0 and service ~= nil)
   UpdateRollToggleButtonState(controlFrame and controlFrame.startButton or nil, true)
   AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
 
@@ -3909,6 +4155,54 @@ local function MakeQuestRow(parent, index, width, isCurrent)
   end
 
   return row
+end
+
+ConfigureKnownQuestRow = function(row, entry)
+  if not row then
+    return
+  end
+
+  if not entry then
+    row.quest = nil
+    row.key = nil
+    row:Hide()
+    return
+  end
+
+  if entry.kind == "header" then
+    row.quest = nil
+    row.key = nil
+    row.title:SetWidth(KNOWN_QUEST_ROW_WIDTH - 12)
+    row.title:SetText("[" .. tostring(entry.title or "Other") .. "]")
+    row.title:SetTextColor(THEME.heading[1], THEME.heading[2], THEME.heading[3], THEME.heading[4] or 1)
+    if row.checkbox then
+      row.checkbox:SetChecked(false)
+      row.checkbox:Hide()
+    end
+    row:Show()
+    return
+  end
+
+  local quest = entry.quest
+  if not quest then
+    row.quest = nil
+    row.key = nil
+    row:Hide()
+    return
+  end
+
+  local wanted = quest.key and state.desiredQuests and state.desiredQuests[quest.key] == true
+  row.quest = quest
+  row.key = quest.key
+  row.title:SetWidth(KNOWN_QUEST_ROW_WIDTH - 36)
+  row.title:SetText(QuestLabel(quest))
+  row.title:SetTextColor(wanted and THEME.good[1] or THEME.gold[1], wanted and THEME.good[2] or THEME.gold[2], wanted and THEME.good[3] or THEME.gold[3])
+  if row.checkbox then
+    row.checkbox:SetChecked(wanted)
+    SetCheckboxVisual(row.checkbox)
+    row.checkbox:Show()
+  end
+  row:Show()
 end
 
 function AutoCallboardRuntime.SetControlFrameSize(width, height)
@@ -4032,6 +4326,9 @@ function AutoCallboardRuntime.SetQuestPanelExpanded(expanded)
   if not controlFrame then
     return
   end
+
+  expanded = expanded and true or false
+  AutoCallboardRuntime.SaveQuestPanelExpanded(expanded)
 
   if AutoCallboardRuntime.questPanelChanging then
     return
@@ -4179,16 +4476,54 @@ function AutoCallboardRuntime.CreateQuestWindow()
   SkinMutedText(autoAcceptSharedLabel)
   AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
 
-  knownPageText = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  knownPageText:SetPoint("TOPLEFT", questWindow, "TOPLEFT", 24, -216)
-  knownPageText:SetWidth(QUEST_WINDOW_WIDTH - 62)
-  knownPageText:SetJustifyH("LEFT")
-  knownPageText:SetText("Check the quests you want to AutoRoll | Known: 0")
-  SkinHeadingText(knownPageText)
+  local categoryLabel = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  categoryLabel:SetPoint("TOPLEFT", questWindow, "TOPLEFT", 24, -206)
+  categoryLabel:SetText("Show")
+  SkinMutedText(categoryLabel)
+
+  local previousCategoryLabel = categoryLabel
+  AutoCallboardRuntime.knownQuestTypeButtons = {}
+  for i = 1, table.getn(AutoCallboardRuntime.questTypeFilterOptions) do
+    local option = AutoCallboardRuntime.questTypeFilterOptions[i]
+    local checkbox = CreateFrame("CheckButton", nil, questWindow)
+    if i == 1 then
+      checkbox:SetPoint("LEFT", categoryLabel, "RIGHT", 14, 0)
+    else
+      checkbox:SetPoint("LEFT", previousCategoryLabel, "RIGHT", 18, 0)
+    end
+    checkbox._acbQuestType = option.questType
+    SkinCheckbox(checkbox)
+    checkbox:SetScript("OnClick", function(self)
+      AutoCallboardRuntime.SetKnownQuestTypeFilter(self._acbQuestType)
+    end)
+    checkbox:SetScript("OnEnter", function(self)
+      SetCheckboxVisual(self, "hover")
+    end)
+    checkbox:SetScript("OnLeave", function(self)
+      SetCheckboxVisual(self)
+    end)
+
+    local checkboxLabel = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    checkboxLabel:SetPoint("LEFT", checkbox, "RIGHT", 6, 0)
+    checkboxLabel:SetText(option.label)
+    SkinMutedText(checkboxLabel)
+
+    checkbox._acbLabel = checkboxLabel
+    table.insert(AutoCallboardRuntime.knownQuestTypeButtons, checkbox)
+    previousCategoryLabel = checkboxLabel
+  end
+  AutoCallboardRuntime.SyncKnownQuestTypeButtons()
+
+  AutoCallboardRuntime.knownPageText = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  AutoCallboardRuntime.knownPageText:SetPoint("TOPLEFT", questWindow, "TOPLEFT", 24, -238)
+  AutoCallboardRuntime.knownPageText:SetWidth(QUEST_WINDOW_WIDTH - 62)
+  AutoCallboardRuntime.knownPageText:SetJustifyH("LEFT")
+  AutoCallboardRuntime.knownPageText:SetText("Check the quests you want to AutoRoll | Known: 0")
+  SkinHeadingText(AutoCallboardRuntime.knownPageText)
 
   knownScrollFrame = CreateFrame("ScrollFrame", "AutoCallboardKnownQuestScrollFrame", questWindow, "FauxScrollFrameTemplate")
-  knownScrollFrame:SetPoint("TOPLEFT", knownPageText, "BOTTOMLEFT", -4, -8)
-  knownScrollFrame:SetPoint("BOTTOMRIGHT", questWindow, "BOTTOMRIGHT", -34, 80)
+  knownScrollFrame:SetPoint("TOPLEFT", AutoCallboardRuntime.knownPageText, "BOTTOMLEFT", -4, -8)
+  knownScrollFrame:SetPoint("BOTTOMRIGHT", questWindow, "BOTTOMRIGHT", -34, 104)
   knownScrollFrame:EnableMouseWheel(true)
   local knownScrollBar = SkinScrollBar(knownScrollFrame)
   if knownScrollBar then
@@ -4221,25 +4556,25 @@ function AutoCallboardRuntime.CreateQuestWindow()
 
   for i = 1, KNOWN_ROWS do
     knownQuestRows[i] = MakeQuestRow(questWindow, i, KNOWN_QUEST_ROW_WIDTH, false)
-    knownQuestRows[i]:SetPoint("TOPLEFT", knownPageText, "BOTTOMLEFT", 0, -10 - ((i - 1) * QUEST_ROW_HEIGHT))
+    knownQuestRows[i]:SetPoint("TOPLEFT", AutoCallboardRuntime.knownPageText, "BOTTOMLEFT", 0, -10 - ((i - 1) * QUEST_ROW_HEIGHT))
   end
 
   local questToolbarWidth = 72 + 8 + 54 + 8 + 66 + 8 + 66
 
-  startRollButton = CreateFrame("Button", nil, questWindow, "SecureActionButtonTemplate,UIPanelButtonTemplate")
-  startRollButton:SetWidth(72)
-  startRollButton:SetHeight(24)
-  startRollButton:SetText("Start")
-  startRollButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOM", -(questToolbarWidth / 2), 46)
-  SkinButton(startRollButton)
-  AutoCallboardRuntime.ConfigureStartButton(startRollButton)
-  UpdateRollToggleButtonState(startRollButton, IsQuestRollStartAvailable())
+  AutoCallboardRuntime.startRollButton = CreateFrame("Button", nil, questWindow, "SecureActionButtonTemplate,UIPanelButtonTemplate")
+  AutoCallboardRuntime.startRollButton:SetWidth(72)
+  AutoCallboardRuntime.startRollButton:SetHeight(24)
+  AutoCallboardRuntime.startRollButton:SetText("Start")
+  AutoCallboardRuntime.startRollButton:SetPoint("BOTTOMLEFT", questWindow, "BOTTOM", -(questToolbarWidth / 2), 54)
+  SkinButton(AutoCallboardRuntime.startRollButton)
+  AutoCallboardRuntime.ConfigureStartButton(AutoCallboardRuntime.startRollButton)
+  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, IsQuestRollStartAvailable())
 
   AutoCallboardRuntime.shareQuestButton = CreateFrame("Button", nil, questWindow, "UIPanelButtonTemplate")
   AutoCallboardRuntime.shareQuestButton:SetWidth(54)
   AutoCallboardRuntime.shareQuestButton:SetHeight(24)
   AutoCallboardRuntime.shareQuestButton:SetText("Share")
-  AutoCallboardRuntime.shareQuestButton:SetPoint("LEFT", startRollButton, "RIGHT", 8, 0)
+  AutoCallboardRuntime.shareQuestButton:SetPoint("LEFT", AutoCallboardRuntime.startRollButton, "RIGHT", 8, 0)
   SkinButton(AutoCallboardRuntime.shareQuestButton)
   AutoCallboardRuntime.shareQuestButton:SetScript("OnClick", function()
     AutoCallboardRuntime.ShareAcceptedQuest("quest window button")
@@ -4277,8 +4612,14 @@ function AutoCallboardRuntime.CreateQuestWindow()
     ShowQuestDataWindow("import")
     end)
 
+  AutoCallboardRuntime.questGoldText = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  AutoCallboardRuntime.questGoldText:SetPoint("BOTTOMLEFT", questWindow, "BOTTOMLEFT", 24, 32)
+  AutoCallboardRuntime.questGoldText:SetWidth(540)
+  AutoCallboardRuntime.questGoldText:SetJustifyH("LEFT")
+  SkinMutedText(AutoCallboardRuntime.questGoldText)
+
   questStatusText = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  questStatusText:SetPoint("BOTTOMLEFT", questWindow, "BOTTOMLEFT", 24, 22)
+  questStatusText:SetPoint("BOTTOMLEFT", questWindow, "BOTTOMLEFT", 24, 16)
   questStatusText:SetWidth(540)
   questStatusText:SetJustifyH("LEFT")
   SkinMutedText(questStatusText)
@@ -4887,15 +5228,15 @@ ApplySummonButtonAttributes = function()
 
   AutoCallboardRuntime.ApplySecureMacroButtonAttributes(button, AutoCallboardRuntime.GetSummonMacroText(), "callboard")
 
-  if startRollButton then
-    AutoCallboardRuntime.ConfigureStartButton(startRollButton)
+  if AutoCallboardRuntime.startRollButton then
+    AutoCallboardRuntime.ConfigureStartButton(AutoCallboardRuntime.startRollButton)
   end
 
   if controlFrame and controlFrame.startButton then
     AutoCallboardRuntime.ConfigureStartButton(controlFrame.startButton)
   end
 
-  UpdateRollToggleButtonState(startRollButton, IsQuestRollStartAvailable())
+  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, IsQuestRollStartAvailable())
   UpdateRollToggleButtonState(controlFrame and controlFrame.startButton or nil, true)
 
   button:SetText(state.targetName)
@@ -4918,8 +5259,14 @@ local function CreateCallboardButton()
     self:StopMovingOrSizing()
     SaveButtonPosition()
     end)
+  controlFrame:SetScript("OnShow", function()
+    AutoCallboardRuntime.SaveControlFrameShown(true)
+    end)
   controlFrame:SetScript("OnHide", function()
+    AutoCallboardRuntime.SaveControlFrameShown(false)
+
     if questWindow and questWindow:IsShown() then
+      AutoCallboardRuntime.SaveQuestPanelExpanded(false)
       questWindow:Hide()
     end
 
@@ -5081,6 +5428,10 @@ local function CreateCallboardButton()
     controlFrame:Show()
   else
     controlFrame:Hide()
+  end
+
+  if state.buttonShown and state.questPanelExpanded then
+    AutoCallboardRuntime.SetQuestPanelExpanded(true)
   end
 end
 
