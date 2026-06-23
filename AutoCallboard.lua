@@ -1286,7 +1286,7 @@ function AutoCallboardRuntime.IsCallboardUiPresent()
 end
 
 function AutoCallboardRuntime.HasCurrentObjectiveData()
-  return table.getn(GetCurrentObjectives()) > 0
+  return Core.isObjectiveChoiceList(GetCurrentObjectives())
 end
 
 function AutoCallboardRuntime.IsCallboardDataAvailable()
@@ -3020,7 +3020,7 @@ function AutoCallboardRuntime.SelectQuestDataText(alreadyFocused)
   if not alreadyFocused then
     dataEditBox:SetFocus()
   end
-  dataEditBox:HighlightText(0)
+  dataEditBox:HighlightText()
   AutoCallboardRuntime.SetQuestDataSelectionVisible(true)
 end
 
@@ -3537,8 +3537,9 @@ local function ShowQuestDataWindow(mode)
       if AutoCallboardRuntime.questDataMode == "export" then
         AutoCallboardRuntime.questDataEditBoxUpdating = true
         self:SetText(AutoCallboardRuntime.questDataReadOnlyText or "")
+        self:HighlightText()
         AutoCallboardRuntime.questDataEditBoxUpdating = false
-        AutoCallboardRuntime.SelectQuestDataText()
+        AutoCallboardRuntime.SetQuestDataSelectionVisible(true)
       else
         AutoCallboardRuntime.SetQuestDataSelectionVisible(false)
       end
@@ -3592,6 +3593,9 @@ local function ShowQuestDataWindow(mode)
     SkinButton(selectButton)
     AutoCallboardRuntime.questDataSelectButton = selectButton
     selectButton:SetScript("OnClick", function()
+      if AutoCallboardRuntime.questDataMode == "export" then
+        SetQuestDataText(AutoCallboardRuntime.ExportQuestDataText("select-all"))
+      end
       AutoCallboardRuntime.SelectQuestDataText()
       end)
 
@@ -3712,6 +3716,13 @@ local function AppendQuestDebugSnapshot()
   AppendDebugLog("debug", "objectiveBoard ready=" .. FormatSeconds(SecondsRemaining(AutoCallboardRuntime.objectiveBoardReadyUntil)) .. " pending=" .. FormatSeconds(SecondsRemaining(AutoCallboardRuntime.objectiveRequestPendingUntil)) .. " attempts=" .. tostring(AutoCallboardRuntime.objectiveRequestAttempts or 0) .. " open=" .. tostring(AutoCallboardRuntime.objectiveBoardAccessOpen) .. " manual=" .. tostring(AutoCallboardRuntime.manualBoardOpenRequired))
   AutoCallboardRuntime.AppendBoardDetectionDebugSnapshot()
   AutoCallboardRuntime.AppendCallboardCooldownDebugSnapshot()
+  if AutoCallboardRuntime.AppendKnownQuestFilterDebugSnapshot then
+    AutoCallboardRuntime.AppendKnownQuestFilterDebugSnapshot()
+  end
+
+  if AutoCallboardRuntime.AppendObjectiveApiDebugSnapshot then
+    AutoCallboardRuntime.AppendObjectiveApiDebugSnapshot(objectives)
+  end
 
   if table.getn(desiredKeys) == 0 then
     AppendDebugLog("debug", "wanted keys: none")
@@ -3755,6 +3766,146 @@ AutoCallboardRuntime.knownQuestTypeFilters = AutoCallboardRuntime.knownQuestType
 local function GetQuestTypeName(questType)
   questType = tonumber(questType) or 0
   return QUEST_TYPE_NAMES[questType] or "Other"
+end
+
+-- Fields the addon expects the ObjectivesService to deliver on each objective.
+-- Anything present but not listed here is flagged [NEW]; anything required but
+-- absent is flagged MISSING. A server-side format change shows up as either.
+AutoCallboardRuntime.expectedApiObjectiveFields = {
+  key = true, id = true, questId = true, title = true, objectiveText = true,
+  zoneOrSort = true, questType = true,
+  normalSoulAshes = true, hc1SoulAshes = true, hc2SoulAshes = true, hc3SoulAshes = true, hc4SoulAshes = true,
+  normalXp = true, hc1Xp = true, hc2Xp = true, hc3Xp = true, hc4Xp = true,
+  seen = true, lastSeenRoll = true,
+}
+AutoCallboardRuntime.requiredApiObjectiveFields = { "title", "objectiveText" }
+
+function AutoCallboardRuntime.FormatApiValue(value)
+  local valueType = type(value)
+
+  if valueType == "string" then
+    return "\"" .. CompactText(value) .. "\""
+  end
+
+  if valueType == "table" then
+    return "<table>"
+  end
+
+  return tostring(value)
+end
+
+-- Dumps the complete raw payload for one objective so a renamed/added/removed
+-- field, moved data, or changed value is visible by direct comparison.
+function AutoCallboardRuntime.AppendRawApiObjectiveFields(index, obj)
+  if type(obj) ~= "table" then
+    AppendDebugLog("api-raw", "objective " .. tostring(index) .. " is " .. type(obj) .. " (expected table)")
+    return
+  end
+
+  local keys = {}
+  local present = {}
+
+  for fieldKey in pairs(obj) do
+    table.insert(keys, fieldKey)
+    present[fieldKey] = true
+  end
+
+  table.sort(keys, function(a, b)
+    return tostring(a) < tostring(b)
+    end)
+
+  for j = 1, table.getn(keys) do
+    local fieldKey = keys[j]
+    local value = obj[fieldKey]
+    local newTag = AutoCallboardRuntime.expectedApiObjectiveFields[fieldKey] and "" or " [NEW]"
+
+    AppendDebugLog("api-raw", "objective " .. tostring(index) .. " ." .. tostring(fieldKey)
+      .. " (" .. type(value) .. ") = " .. AutoCallboardRuntime.FormatApiValue(value) .. newTag)
+
+    if type(value) == "table" then
+      for subKey, subValue in pairs(value) do
+        AppendDebugLog("api-raw", "objective " .. tostring(index) .. " ." .. tostring(fieldKey) .. "." .. tostring(subKey)
+          .. " (" .. type(subValue) .. ") = " .. AutoCallboardRuntime.FormatApiValue(subValue))
+      end
+    end
+  end
+
+  local missing = {}
+
+  for r = 1, table.getn(AutoCallboardRuntime.requiredApiObjectiveFields) do
+    if not present[AutoCallboardRuntime.requiredApiObjectiveFields[r]] then
+      table.insert(missing, AutoCallboardRuntime.requiredApiObjectiveFields[r])
+    end
+  end
+
+  if table.getn(missing) > 0 then
+    AppendDebugLog("api-raw", "objective " .. tostring(index) .. " MISSING required field(s): " .. table.concat(missing, ", "))
+  end
+end
+
+-- Logs the raw ObjectivesService payload next to what the addon derived, so the
+-- debug window shows whether the server is sending bad category data (reward
+-- magnitudes in API.questType, real values only in the text suffix) and whether
+-- a server update changed the payload shape (see [NEW]/MISSING tags below).
+function AutoCallboardRuntime.AppendObjectiveApiDebugSnapshot(objectives)
+  if not Core.describeObjectiveMetadata then
+    return
+  end
+
+  local service = GetObjectivesService()
+
+  if not service then
+    AppendDebugLog("api", "ObjectivesService missing (ProjectEbonhold.ObjectivesService is nil)")
+    return
+  end
+
+  local serviceKeys = {}
+
+  for serviceKey, serviceValue in pairs(service) do
+    table.insert(serviceKeys, tostring(serviceKey) .. ":" .. type(serviceValue))
+  end
+
+  table.sort(serviceKeys)
+  AppendDebugLog("api", "ObjectivesService surface: " .. (table.getn(serviceKeys) > 0 and table.concat(serviceKeys, ", ") or "empty"))
+
+  objectives = objectives or GetCurrentObjectives()
+
+  if type(objectives) ~= "table" or table.getn(objectives) == 0 then
+    AppendDebugLog("api", "GetCurrentObjectives returned no rows (board closed or API empty)")
+    return
+  end
+
+  for i = 1, table.getn(objectives) do
+    local info = Core.describeObjectiveMetadata(objectives[i])
+    local rawTypeNote = ""
+
+    if info.rawType ~= 0 then
+      rawTypeNote = info.rawTypeRejected and " (rejected: not 1-4)" or " (ok)"
+    end
+
+    local suffix = info.hasSuffix
+        and ("zone=" .. tostring(info.suffixZone) .. ",type=" .. tostring(info.suffixType))
+        or "none"
+
+    AppendDebugLog("api", "objective " .. tostring(i)
+      .. " \"" .. CompactText(Core.questTitle(objectives[i])) .. "\""
+      .. " | API.questType=" .. tostring(info.rawType) .. rawTypeNote
+      .. " API.zoneOrSort=" .. tostring(info.rawZone)
+      .. " | textSuffix=" .. suffix
+      .. " | derived=" .. GetQuestTypeName(info.finalType) .. "(" .. tostring(info.finalType) .. ")"
+      .. " zone=" .. tostring(info.finalZone)
+      .. " | rawText=\"" .. CompactText(info.rawText) .. "\"")
+
+    AutoCallboardRuntime.AppendRawApiObjectiveFields(i, objectives[i])
+  end
+end
+
+function AutoCallboardRuntime.RepairKnownQuestState()
+  if not state or type(state.knownQuests) ~= "table" then
+    return
+  end
+
+  state.knownQuests = Core.copyQuestList(state.knownQuests)
 end
 
 local function CompareKnownQuests(left, right)
@@ -3817,8 +3968,10 @@ function AutoCallboardRuntime.CountActiveQuestTypeFilters()
   local count = 0
   local lastQuestType = nil
 
-  for questType, enabled in pairs(AutoCallboardRuntime.knownQuestTypeFilters or {}) do
-    if enabled == true then
+  for i = 1, table.getn(AutoCallboardRuntime.questTypeFilterOptions) do
+    local questType = AutoCallboardRuntime.questTypeFilterOptions[i].questType
+
+    if Core.questTypeFilterEnabled(AutoCallboardRuntime.knownQuestTypeFilters, questType) then
       count = count + 1
       lastQuestType = questType
     end
@@ -3837,7 +3990,7 @@ function AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
 
   for i = 1, table.getn(AutoCallboardRuntime.questTypeFilterOptions) do
     local option = AutoCallboardRuntime.questTypeFilterOptions[i]
-    if AutoCallboardRuntime.knownQuestTypeFilters[option.questType] == true then
+    if Core.questTypeFilterEnabled(AutoCallboardRuntime.knownQuestTypeFilters, option.questType) then
       table.insert(names, option.label)
     end
   end
@@ -3848,7 +4001,7 @@ end
 function AutoCallboardRuntime.SyncKnownQuestTypeButtons()
   for i = 1, table.getn(AutoCallboardRuntime.knownQuestTypeButtons) do
     local checkbox = AutoCallboardRuntime.knownQuestTypeButtons[i]
-    local isChecked = AutoCallboardRuntime.knownQuestTypeFilters[checkbox._acbQuestType] == true
+    local isChecked = Core.questTypeFilterEnabled(AutoCallboardRuntime.knownQuestTypeFilters, checkbox._acbQuestType)
 
     checkbox:SetChecked(isChecked)
     SetCheckboxVisual(checkbox)
@@ -3857,11 +4010,14 @@ end
 
 function AutoCallboardRuntime.SetKnownQuestTypeFilter(questType)
   AutoCallboardRuntime.knownQuestTypeFilters = AutoCallboardRuntime.knownQuestTypeFilters or {}
+  questType = tonumber(questType) or 0
 
-  if AutoCallboardRuntime.knownQuestTypeFilters[questType] == true then
+  if Core.questTypeFilterEnabled(AutoCallboardRuntime.knownQuestTypeFilters, questType) then
     AutoCallboardRuntime.knownQuestTypeFilters[questType] = nil
+    AutoCallboardRuntime.knownQuestTypeFilters[tostring(questType)] = nil
   else
     AutoCallboardRuntime.knownQuestTypeFilters[questType] = true
+    AutoCallboardRuntime.knownQuestTypeFilters[tostring(questType)] = nil
   end
 
   AutoCallboardRuntime.SyncKnownQuestTypeButtons()
@@ -3870,21 +4026,41 @@ end
 
 local function FilterKnownQuests()
   local filtered = {}
+  AutoCallboardRuntime.RepairKnownQuestState()
+
   local quests = state and state.knownQuests or {}
+  local desired = state and state.desiredQuests or {}
+  local activeTypeCount = AutoCallboardRuntime.CountActiveQuestTypeFilters()
+  local useTypeFallback = activeTypeCount > 0 and Core.needsKnownTypeFallback(quests, AutoCallboardRuntime.knownQuestTypeFilters)
+  local showSelectedOnly = activeTypeCount == 0 and Core.hasDesiredKnownQuest(quests, desired)
+  local filterMode = showSelectedOnly and "selected" or "all"
 
   for i = 1, table.getn(quests) do
     local quest = quests[i]
+    local matchesFilter
 
-    if Core.questMatchesKnownFilter(quest, AutoCallboardRuntime.knownQuestTypeFilters, state and state.desiredQuests) and QuestMatchesSearch(quest, questSearchText) then
+    if useTypeFallback then
+      matchesFilter = true
+      filterMode = "type-fallback"
+    elseif activeTypeCount > 0 then
+      matchesFilter = Core.questMatchesKnownFilter(quest, AutoCallboardRuntime.knownQuestTypeFilters, desired)
+      filterMode = "type"
+    elseif showSelectedOnly then
+      matchesFilter = Core.questMatchesKnownFilter(quest, {}, desired)
+    else
+      matchesFilter = true
+    end
+
+    if matchesFilter and QuestMatchesSearch(quest, questSearchText) then
       table.insert(filtered, quest)
     end
   end
 
-  return filtered
+  return filtered, filterMode
 end
 
 local function BuildKnownQuestEntries()
-  local filtered = FilterKnownQuests()
+  local filtered, filterMode = FilterKnownQuests()
   table.sort(filtered, CompareKnownQuests)
 
   local entries = {}
@@ -3892,7 +4068,7 @@ local function BuildKnownQuestEntries()
 
   for i = 1, table.getn(filtered) do
     local quest = filtered[i]
-    local typeName = GetQuestTypeName(quest and quest.questType)
+    local typeName = filterMode == "type-fallback" and "Category data missing" or GetQuestTypeName(quest and quest.questType)
 
     if typeName ~= lastTypeName then
       table.insert(entries, {
@@ -3908,7 +4084,190 @@ local function BuildKnownQuestEntries()
     })
   end
 
-  return entries, filtered
+  return entries, filtered, filterMode
+end
+
+function AutoCallboardRuntime.AppendKnownQuestFilterDebugSnapshot()
+  local diagnostics = AutoCallboardRuntime.GetKnownQuestDisplayDiagnostics()
+
+  AppendDebugLog("debug", "known filter mode=" .. tostring(diagnostics.mode)
+      .. " reason=" .. tostring(diagnostics.reason)
+      .. " known=" .. tostring(diagnostics.knownCount)
+      .. " filtered=" .. tostring(diagnostics.filteredCount)
+      .. " rows=" .. tostring(diagnostics.rowCount)
+      .. " selected=" .. tostring(diagnostics.selectedCount)
+      .. " selectedKnown=" .. tostring(diagnostics.selectedKnownCount)
+      .. " selectedMissing=" .. tostring(diagnostics.selectedMissingCount)
+      .. " typeFilters=\"" .. tostring(diagnostics.typeFilters) .. "\""
+      .. " typeCounts=\"" .. tostring(diagnostics.typeCounts) .. "\""
+      .. " search=\"" .. CompactText(diagnostics.searchText) .. "\""
+      .. " scroll=" .. tostring(knownScrollOffset) .. "/" .. tostring(diagnostics.maxScrollOffset)
+      .. " current=" .. tostring(diagnostics.currentObjectiveCount)
+      .. " choiceList=" .. tostring(diagnostics.hasObjectiveChoiceList))
+  AppendDebugLog("debug", "known display summary=\"" .. tostring(diagnostics.summary) .. "\"")
+
+  if diagnostics.firstKnown ~= "" then
+    AppendDebugLog("debug", "known first: " .. diagnostics.firstKnown)
+  end
+
+  if diagnostics.firstFiltered ~= "" then
+    AppendDebugLog("debug", "known first shown: " .. diagnostics.firstFiltered)
+  end
+
+  if diagnostics.selectedMissingKeys ~= "" then
+    AppendDebugLog("debug", "known missing selected keys: " .. diagnostics.selectedMissingKeys)
+  end
+
+  for i = 1, table.getn(diagnostics.knownSamples) do
+    AppendDebugLog("debug", "known sample " .. tostring(i) .. ": " .. diagnostics.knownSamples[i])
+  end
+
+  for i = 1, table.getn(diagnostics.filteredSamples) do
+    AppendDebugLog("debug", "known shown sample " .. tostring(i) .. ": " .. diagnostics.filteredSamples[i])
+  end
+end
+
+function AutoCallboardRuntime.GetKnownQuestDisplayDiagnostics()
+  local quests = state and state.knownQuests or {}
+  local desired = state and state.desiredQuests or {}
+  local entries, filtered, filterMode = BuildKnownQuestEntries()
+  local activeTypeNames = AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
+  local selectedKnownCount = 0
+  local selectedMissingCount = 0
+  local currentObjectives = GetCurrentObjectives()
+  local firstKnown = quests[1] and ((Core.questKey(quests[1]) or "no-key") .. " " .. QuestLabel(quests[1])) or ""
+  local firstFiltered = filtered[1] and ((Core.questKey(filtered[1]) or "no-key") .. " " .. QuestLabel(filtered[1])) or ""
+  local selectedMissingKeys = {}
+  local knownSamples = {}
+  local filteredSamples = {}
+
+  for key, enabled in pairs(desired) do
+    if enabled == true then
+      if Core.hasDesiredKnownQuest(quests, { [key] = true }) then
+        selectedKnownCount = selectedKnownCount + 1
+      else
+        selectedMissingCount = selectedMissingCount + 1
+        if table.getn(selectedMissingKeys) < 3 then
+          table.insert(selectedMissingKeys, tostring(key))
+        end
+      end
+    end
+  end
+
+  for i = 1, math.min(3, table.getn(quests)) do
+    table.insert(knownSamples, (Core.questKey(quests[i]) or "no-key") .. " " .. QuestLabel(quests[i]))
+  end
+
+  for i = 1, math.min(3, table.getn(filtered)) do
+    table.insert(filteredSamples, (Core.questKey(filtered[i]) or "no-key") .. " " .. QuestLabel(filtered[i]))
+  end
+
+  return {
+    knownCount = table.getn(quests),
+    filteredCount = table.getn(filtered),
+    rowCount = table.getn(entries),
+    selectedCount = CountDesiredQuests(),
+    selectedKnownCount = selectedKnownCount,
+    selectedMissingCount = selectedMissingCount,
+    mode = filterMode,
+    reason = AutoCallboardRuntime.GetKnownQuestDisplayReason(quests, filtered, entries, filterMode, selectedKnownCount, selectedMissingCount, activeTypeNames),
+    typeFilters = table.concat(activeTypeNames, ", "),
+    typeCounts = AutoCallboardRuntime.FormatKnownQuestTypeCounts(quests),
+    searchText = questSearchText,
+    maxScrollOffset = math.max(0, table.getn(entries) - KNOWN_ROWS),
+    currentObjectiveCount = table.getn(currentObjectives),
+    hasObjectiveChoiceList = Core.isObjectiveChoiceList(currentObjectives),
+    firstKnown = firstKnown,
+    firstFiltered = firstFiltered,
+    selectedMissingKeys = table.concat(selectedMissingKeys, ", "),
+    knownSamples = knownSamples,
+    filteredSamples = filteredSamples,
+    summary = AutoCallboardRuntime.FormatKnownQuestDisplaySummary(quests, filtered, entries, filterMode, activeTypeNames, selectedKnownCount, selectedMissingCount),
+  }
+end
+
+function AutoCallboardRuntime.FormatKnownQuestTypeCounts(quests)
+  local counts = Core.questTypeCounts(quests)
+  local parts = {}
+
+  for i = 1, table.getn(AutoCallboardRuntime.questTypeFilterOptions) do
+    local option = AutoCallboardRuntime.questTypeFilterOptions[i]
+    table.insert(parts, tostring(option.label) .. "=" .. tostring(counts[option.questType] or 0))
+  end
+
+  return table.concat(parts, ", ")
+end
+
+function AutoCallboardRuntime.GetKnownQuestDisplayReason(quests, filtered, entries, filterMode, selectedKnownCount, selectedMissingCount, activeTypeNames)
+  if table.getn(quests) == 0 then
+    return "no_known_quests"
+  end
+
+  if table.getn(entries) > 0 then
+    if filterMode == "selected" then
+      return "showing_selected_known"
+    end
+
+    if filterMode == "type-fallback" then
+      return "category_metadata_missing_fallback"
+    end
+
+    if filterMode == "type" then
+      return "showing_type_filter"
+    end
+
+    if selectedMissingCount > 0 and selectedKnownCount == 0 then
+      return "selected_keys_missing_showing_all"
+    end
+
+    return "showing_all_known"
+  end
+
+  if questSearchText ~= "" then
+    return "search_hides_all"
+  end
+
+  if table.getn(activeTypeNames) > 0 and Core.needsKnownTypeFallback(quests, AutoCallboardRuntime.knownQuestTypeFilters) then
+    return "category_metadata_missing"
+  end
+
+  if table.getn(activeTypeNames) > 0 then
+    return "type_filter_hides_all"
+  end
+
+  if filterMode == "selected" and table.getn(filtered) == 0 then
+    return "selected_filter_hides_all"
+  end
+
+  return "unknown_empty_list"
+end
+
+function AutoCallboardRuntime.FormatKnownQuestDisplaySummary(quests, filtered, entries, filterMode, activeTypeNames, selectedKnownCount, selectedMissingCount)
+  local summary = "Known: " .. tostring(table.getn(quests)) .. " | Matches: " .. tostring(table.getn(filtered)) .. " | Rows: " .. tostring(table.getn(entries))
+
+  if table.getn(activeTypeNames) > 0 then
+    if filterMode == "type-fallback" then
+      summary = summary .. " | Showing: Category data missing fallback"
+    else
+      summary = summary .. " | Showing: " .. table.concat(activeTypeNames, ", ")
+    end
+  elseif filterMode == "all" then
+    summary = summary .. " | Showing: All"
+  else
+    summary = summary .. " | Showing: Selected"
+  end
+
+  if selectedMissingCount > 0 then
+    summary = summary .. " | Missing selected: " .. tostring(selectedMissingCount)
+  elseif selectedKnownCount > 0 then
+    summary = summary .. " | Selected known: " .. tostring(selectedKnownCount)
+  end
+
+  if table.getn(entries) == 0 then
+    summary = summary .. " | Empty reason: " .. AutoCallboardRuntime.GetKnownQuestDisplayReason(quests, filtered, entries, filterMode, selectedKnownCount, selectedMissingCount, activeTypeNames)
+  end
+
+  return summary
 end
 
 local function AddRewardLine(label, xp, soulAshes)
@@ -4232,9 +4591,7 @@ UpdateQuestWindow = function()
     end
   end
 
-  local knownEntries, filteredKnownQuests = BuildKnownQuestEntries()
-  local totalKnownCount = table.getn(state.knownQuests or {})
-  local knownCount = table.getn(filteredKnownQuests)
+  local knownEntries = BuildKnownQuestEntries()
   local displayCount = table.getn(knownEntries)
   local maxOffset = math.max(0, displayCount - KNOWN_ROWS)
 
@@ -4281,22 +4638,9 @@ UpdateQuestWindow = function()
   end
 
   if AutoCallboardRuntime.knownPageText then
-    local summary = "Check the quests you want to AutoRoll | Known: " .. tostring(totalKnownCount)
-    local activeTypeNames = AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
+    local diagnostics = AutoCallboardRuntime.GetKnownQuestDisplayDiagnostics()
 
-    if questSearchText ~= "" or table.getn(activeTypeNames) > 0 then
-      summary = summary .. " | Matches: " .. tostring(knownCount)
-    end
-
-    if table.getn(activeTypeNames) > 0 then
-      summary = summary .. " | Showing: " .. table.concat(activeTypeNames, ", ")
-    elseif desiredCount == 0 then
-      summary = summary .. " | Showing: All"
-    else
-      summary = summary .. " | Showing: Selected"
-    end
-
-    AutoCallboardRuntime.knownPageText:SetText(summary)
+    AutoCallboardRuntime.knownPageText:SetText(diagnostics.summary)
   end
 
   AutoCallboardRuntime.SyncKnownQuestTypeButtons()
@@ -4920,6 +5264,9 @@ local function HandleDebugAction(action, value)
   elseif action == "etrace" then
     AutoCallboardRuntime.OpenEventTrace()
   elseif action == "inspect" then
+    if AutoCallboardRuntime.AppendKnownQuestFilterDebugSnapshot then
+      AutoCallboardRuntime.AppendKnownQuestFilterDebugSnapshot()
+    end
     InspectMouseFocus()
   elseif action == "dump" then
     DumpKnownFrames()

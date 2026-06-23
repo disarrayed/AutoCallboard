@@ -50,6 +50,98 @@ local function trim(value)
     return (value:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local function objectiveTextParts(value)
+    local text = trim(value)
+    local cleanText, zoneOrSort, questType = string.match(text, "^(.-),%s*(%d+)%s*,%s*(%d+)%s*%.?%s*$")
+
+    if cleanText then
+        return trim(cleanText), tonumber(zoneOrSort) or 0, tonumber(questType) or 0
+    end
+
+    return text, 0, 0
+end
+
+-- The Callboard categories are a fixed, small set. The server API has been seen
+-- delivering reward magnitudes (e.g. 601921, 230570, 5443) in the questType
+-- field, so any value outside this set is treated as "unknown" (0).
+local VALID_QUEST_TYPES = { [1] = true, [2] = true, [3] = true, [4] = true }
+
+function Core.sanitizeQuestType(value)
+    value = tonumber(value) or 0
+    if VALID_QUEST_TYPES[value] then
+        return value
+    end
+
+    return 0
+end
+
+local function containsAny(value, needles)
+    value = string.lower(trim(value))
+
+    for i = 1, table.getn(needles) do
+        if string.find(value, needles[i], 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local PROFESSION_HINTS = {
+    "bulk order:",
+    "crafting materials:",
+    "saronite",
+    "cobalt bar",
+    "titanium",
+    "eternal earth",
+    "eternal air",
+    "eternal fire",
+    "eternal water",
+    "eternal shadow",
+    "eternal life",
+    "icethorn",
+    "adder's tongue",
+    "lichbloom",
+    "frost lotus",
+    "borean leather",
+    "arctic fur",
+    "dragonfin",
+    "glacial salmon",
+    "constrictor grass",
+}
+
+local RAID_HINTS = {
+    "malygos",
+    "kelthuzad",
+    "kel'thuzad",
+    "sartharion",
+    "naxxramas",
+    "obsidian sanctum",
+    "eye of eternity",
+    "construct quarter",
+}
+
+local DUNGEON_HINTS = {
+    "keristrasza",
+    "ingvar",
+    "king ymiron",
+    "prophet tharon'ja",
+    "tharon'ja",
+    "utgarde pinnacle",
+    "drak'tharon keep",
+    "the nexus.",
+    "the nexus ",
+}
+
+local OPEN_WORLD_TITLE_PREFIXES = {
+    "a growing menace:",
+    "clear the roads",
+    "no mercy:",
+    "pacify ",
+    "sweep and clear:",
+    "storm peaks trophy",
+}
+
 local function copyDefaults()
     return {
         targetName = DEFAULTS.targetName,
@@ -497,6 +589,45 @@ function Core.questTitle(quest)
     return trim(quest.title)
 end
 
+function Core.objectiveText(quest)
+    if type(quest) ~= "table" then
+        return ""
+    end
+
+    local cleanText = objectiveTextParts(quest.objectiveText)
+    return cleanText
+end
+
+function Core.inferQuestType(quest)
+    if type(quest) ~= "table" then
+        return 0
+    end
+
+    local title = Core.questTitle(quest)
+    local objective = Core.objectiveText(quest)
+    local combined = title .. " " .. objective
+
+    if containsAny(combined, PROFESSION_HINTS) then
+        return 4
+    end
+
+    if containsAny(combined, RAID_HINTS) then
+        return 3
+    end
+
+    if containsAny(combined, DUNGEON_HINTS) then
+        return 2
+    end
+
+    if containsAny(title, OPEN_WORLD_TITLE_PREFIXES)
+            or string.find(string.lower(objective), "^kill%s+%d+")
+            or string.find(string.lower(objective), "^collect%s+%d+%s+rare") then
+        return 1
+    end
+
+    return 0
+end
+
 function Core.questKey(quest)
     if type(quest) ~= "table" then
         return nil
@@ -525,13 +656,14 @@ function Core.copyQuestList(quests)
     for i = 1, table.getn(quests) do
         local quest = quests[i]
         if type(quest) == "table" then
+            local zoneOrSort, questType = Core.objectiveMetadata(quest)
             table.insert(copy, {
                 key = quest.key,
                 questId = tonumber(quest.questId) or 0,
                 title = trim(quest.title),
-                objectiveText = trim(quest.objectiveText),
-                zoneOrSort = tonumber(quest.zoneOrSort) or 0,
-                questType = tonumber(quest.questType) or 0,
+                objectiveText = Core.objectiveText(quest),
+                zoneOrSort = zoneOrSort,
+                questType = questType,
                 normalSoulAshes = tonumber(quest.normalSoulAshes) or 0,
                 hc1SoulAshes = tonumber(quest.hc1SoulAshes) or 0,
                 hc2SoulAshes = tonumber(quest.hc2SoulAshes) or 0,
@@ -568,24 +700,71 @@ function Core.copyDesiredMap(desired)
 end
 
 function Core.questMatchesTypeFilter(quest, enabledQuestTypes)
-    if type(enabledQuestTypes) ~= "table" then
-        return true
-    end
-
-    local hasEnabledFilter = false
-    for _, enabled in pairs(enabledQuestTypes) do
-        if enabled == true then
-            hasEnabledFilter = true
-            break
-        end
-    end
-
-    if not hasEnabledFilter then
+    if not Core.hasEnabledQuestTypeFilter(enabledQuestTypes) then
         return true
     end
 
     local questType = tonumber(quest and quest.questType) or 0
-    return enabledQuestTypes[questType] == true
+    return Core.questTypeFilterEnabled(enabledQuestTypes, questType)
+end
+
+function Core.questTypeFilterEnabled(enabledQuestTypes, questType)
+    if type(enabledQuestTypes) ~= "table" then
+        return false
+    end
+
+    questType = tonumber(questType) or 0
+
+    return enabledQuestTypes[questType] == true or enabledQuestTypes[tostring(questType)] == true
+end
+
+function Core.hasEnabledQuestTypeFilter(enabledQuestTypes)
+    if type(enabledQuestTypes) ~= "table" then
+        return false
+    end
+
+    for _, enabled in pairs(enabledQuestTypes) do
+        if enabled == true then
+            return true
+        end
+    end
+
+    return false
+end
+
+function Core.hasAllPrimaryQuestTypeFilters(enabledQuestTypes)
+    if type(enabledQuestTypes) ~= "table" then
+        return false
+    end
+
+    return Core.questTypeFilterEnabled(enabledQuestTypes, 1)
+            and Core.questTypeFilterEnabled(enabledQuestTypes, 2)
+            and Core.questTypeFilterEnabled(enabledQuestTypes, 3)
+            and Core.questTypeFilterEnabled(enabledQuestTypes, 4)
+end
+
+function Core.needsKnownTypeFallback(quests, enabledQuestTypes)
+    if type(quests) ~= "table" or not Core.hasAllPrimaryQuestTypeFilters(enabledQuestTypes) then
+        return false
+    end
+
+    if table.getn(quests) == 0 then
+        return false
+    end
+
+    local hasKnownType = false
+
+    for i = 1, table.getn(quests) do
+        if Core.questMatchesTypeFilter(quests[i], enabledQuestTypes) then
+            return false
+        end
+
+        if (tonumber(quests[i] and quests[i].questType) or 0) > 0 then
+            hasKnownType = true
+        end
+    end
+
+    return not hasKnownType
 end
 
 function Core.hasDesiredQuests(desired)
@@ -602,8 +781,39 @@ function Core.hasDesiredQuests(desired)
     return false
 end
 
+function Core.hasDesiredKnownQuest(quests, desired)
+    if type(quests) ~= "table" or not Core.hasDesiredQuests(desired) then
+        return false
+    end
+
+    for i = 1, table.getn(quests) do
+        local quest = quests[i]
+        local key = type(quest) == "table" and type(quest.key) == "string" and quest.key or Core.questKey(quest)
+        if key and desired[key] == true then
+            return true
+        end
+    end
+
+    return false
+end
+
 function Core.needsUntargetedRollConfirm(desired)
     return not Core.hasDesiredQuests(desired)
+end
+
+function Core.questTypeCounts(quests)
+    local counts = {}
+
+    if type(quests) ~= "table" then
+        return counts
+    end
+
+    for i = 1, table.getn(quests) do
+        local questType = tonumber(quests[i] and quests[i].questType) or 0
+        counts[questType] = (counts[questType] or 0) + 1
+    end
+
+    return counts
 end
 
 function Core.questMatchesKnownFilter(quest, enabledQuestTypes, desired)
@@ -655,6 +865,52 @@ function Core.clearQuestListState(currentState)
     return nextState
 end
 
+function Core.objectiveMetadata(objective)
+    local _, parsedZone, parsedType = objectiveTextParts(objective and objective.objectiveText)
+    parsedZone = tonumber(parsedZone) or 0
+    parsedType = Core.sanitizeQuestType(parsedType)
+
+    local storedZone = tonumber(objective and objective.zoneOrSort) or 0
+    local storedType = Core.sanitizeQuestType(objective and objective.questType)
+
+    -- The server appends the real ",<zoneOrSort>,<questType>" to the objective
+    -- text while filling the structured fields with reward magnitudes, so the
+    -- text suffix is authoritative. Fall back to a sanitized stored value, then
+    -- to name-based inference only when nothing reliable is available.
+    local zoneOrSort = parsedZone > 0 and parsedZone or storedZone
+    local questType = parsedType > 0 and parsedType or storedType
+
+    if questType == 0 then
+        questType = Core.inferQuestType(objective)
+    end
+
+    return zoneOrSort, questType
+end
+
+-- Surfaces exactly what the server API delivered for an objective versus what the
+-- addon derived, so the debug log can show whether bad data is coming from the
+-- API (reward magnitudes in the questType field, real values only in the text
+-- suffix). Pure reporting; it never mutates the objective.
+function Core.describeObjectiveMetadata(objective)
+    local cleanText, parsedZone, parsedType = objectiveTextParts(objective and objective.objectiveText)
+    local rawType = tonumber(objective and objective.questType) or 0
+    local sanitizedRawType = Core.sanitizeQuestType(rawType)
+    local finalZone, finalType = Core.objectiveMetadata(objective)
+
+    return {
+        rawText = trim(objective and objective.objectiveText),
+        cleanText = cleanText,
+        rawZone = tonumber(objective and objective.zoneOrSort) or 0,
+        rawType = rawType,
+        rawTypeRejected = rawType ~= 0 and sanitizedRawType == 0,
+        hasSuffix = (tonumber(parsedZone) or 0) > 0 or Core.sanitizeQuestType(parsedType) > 0,
+        suffixZone = tonumber(parsedZone) or 0,
+        suffixType = Core.sanitizeQuestType(parsedType),
+        finalZone = finalZone,
+        finalType = finalType,
+    }
+end
+
 function Core.captureKnownQuests(existing, objectives, rollCount)
     local known = Core.copyQuestList(existing)
     local indexByKey = {}
@@ -665,7 +921,7 @@ function Core.captureKnownQuests(existing, objectives, rollCount)
         end
     end
 
-    if type(objectives) ~= "table" then
+    if not Core.isObjectiveChoiceList(objectives) then
         return known
     end
 
@@ -675,13 +931,14 @@ function Core.captureKnownQuests(existing, objectives, rollCount)
         local title = Core.questTitle(objective)
 
         if key and title ~= "" then
+            local zoneOrSort, questType = Core.objectiveMetadata(objective)
             local existingIndex = indexByKey[key]
             if existingIndex then
                 known[existingIndex].seen = (known[existingIndex].seen or 0) + 1
                 known[existingIndex].lastSeenRoll = rollCount or known[existingIndex].lastSeenRoll or 0
-                known[existingIndex].objectiveText = trim(objective.objectiveText)
-                known[existingIndex].zoneOrSort = tonumber(objective.zoneOrSort) or known[existingIndex].zoneOrSort or 0
-                known[existingIndex].questType = tonumber(objective.questType) or known[existingIndex].questType or 0
+                known[existingIndex].objectiveText = Core.objectiveText(objective)
+                known[existingIndex].zoneOrSort = zoneOrSort > 0 and zoneOrSort or known[existingIndex].zoneOrSort or 0
+                known[existingIndex].questType = questType > 0 and questType or known[existingIndex].questType or 0
                 known[existingIndex].normalSoulAshes = tonumber(objective.normalSoulAshes) or 0
                 known[existingIndex].hc1SoulAshes = tonumber(objective.hc1SoulAshes) or 0
                 known[existingIndex].hc2SoulAshes = tonumber(objective.hc2SoulAshes) or 0
@@ -697,9 +954,9 @@ function Core.captureKnownQuests(existing, objectives, rollCount)
                     key = key,
                     questId = tonumber(objective.questId) or 0,
                     title = title,
-                    objectiveText = trim(objective.objectiveText),
-                    zoneOrSort = tonumber(objective.zoneOrSort) or 0,
-                    questType = tonumber(objective.questType) or 0,
+                    objectiveText = Core.objectiveText(objective),
+                    zoneOrSort = zoneOrSort,
+                    questType = questType,
                     normalSoulAshes = tonumber(objective.normalSoulAshes) or 0,
                     hc1SoulAshes = tonumber(objective.hc1SoulAshes) or 0,
                     hc2SoulAshes = tonumber(objective.hc2SoulAshes) or 0,
@@ -723,6 +980,20 @@ function Core.captureKnownQuests(existing, objectives, rollCount)
     end)
 
     return known
+end
+
+function Core.isObjectiveChoiceList(objectives)
+    if type(objectives) ~= "table" or table.getn(objectives) < 3 then
+        return false
+    end
+
+    for i = 1, 3 do
+        if Core.questKey(objectives[i]) == nil or Core.questTitle(objectives[i]) == "" then
+            return false
+        end
+    end
+
+    return true
 end
 
 local function encodeField(value)
@@ -1057,7 +1328,7 @@ function Core.toggleDesired(desired, key, enabled)
 end
 
 function Core.findDesiredObjective(objectives, desired)
-    if type(objectives) ~= "table" or type(desired) ~= "table" then
+    if not Core.isObjectiveChoiceList(objectives) or type(desired) ~= "table" then
         return nil
     end
 
