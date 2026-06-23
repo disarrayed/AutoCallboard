@@ -92,6 +92,7 @@ local THEME = {
   debugList = { RGB(18, 18, 18, 0.96) },
   border = { RGB(75, 46, 131, 1) },
   borderDim = { RGB(75, 46, 131, 0.65) },
+  selection = { RGB(176, 72, 248, 0.28) },
   button = { RGB(75, 46, 131, 1) },
   buttonBorder = { RGB(75, 46, 131, 1) },
   buttonStop = { RGB(209, 246, 246, 1) },
@@ -716,6 +717,7 @@ local StopRolling
 local TargetCallboard
 local ClearRollPause
 local ConfigureKnownQuestRow
+local SetKnownScrollOffset
 
 function AutoCallboardRuntime.GetSummonMacroText()
   if state and state.summonSpell and state.summonSpell ~= "" then
@@ -2946,6 +2948,41 @@ local function SetDebugSelectionVisible(selected)
   end
 end
 
+function AutoCallboardRuntime.SetQuestDataSelectionVisible(selected)
+  if AutoCallboardRuntime.questDataScrollFrame then
+    ApplyColor(AutoCallboardRuntime.questDataScrollFrame, "SetBackdropColor", selected and THEME.bgSoft or THEME.bg)
+    ApplyColor(AutoCallboardRuntime.questDataScrollFrame, "SetBackdropBorderColor", selected and THEME.buttonHoverBorder or THEME.borderDim)
+  end
+
+  if AutoCallboardRuntime.questDataSelectionOverlay then
+    if selected then
+      AutoCallboardRuntime.questDataSelectionOverlay:Show()
+    else
+      AutoCallboardRuntime.questDataSelectionOverlay:Hide()
+    end
+  end
+
+  if AutoCallboardRuntime.questDataSelectionText then
+    if selected then
+      AutoCallboardRuntime.questDataSelectionText:Show()
+    else
+      AutoCallboardRuntime.questDataSelectionText:Hide()
+    end
+  end
+end
+
+function AutoCallboardRuntime.SelectQuestDataText(alreadyFocused)
+  if not dataEditBox then
+    return
+  end
+
+  if not alreadyFocused then
+    dataEditBox:SetFocus()
+  end
+  dataEditBox:HighlightText(0)
+  AutoCallboardRuntime.SetQuestDataSelectionVisible(true)
+end
+
 ShowDebugWindow = function()
   if not debugWindow then
     debugWindow = CreateFrame("Frame", "AutoCallboardDebugWindow", UIParent)
@@ -3270,16 +3307,25 @@ local function SetQuestDataText(text)
   end
 
   dataEditBox:SetHeight(math.max(330, lineCount * 14))
+  AutoCallboardRuntime.questDataReadOnlyText = text
+  AutoCallboardRuntime.questDataEditBoxUpdating = true
   dataEditBox:SetText(text)
   dataEditBox:SetCursorPosition(0)
+  AutoCallboardRuntime.questDataEditBoxUpdating = false
+  AutoCallboardRuntime.SetQuestDataSelectionVisible(false)
 end
 
 local function ImportQuestDataFromText(text)
   local quests, imported, skipped = Core.importKnownQuestText(text)
+  AutoCallboardRuntime.LogQuestImportDiagnostics(text, "button", imported, skipped)
 
   if imported <= 0 then
-    Print("No quest data imported. Make sure the text starts with ACBQUESTS1.")
-    AppendDebugLog("import", "failed imported=0 skipped=" .. tostring(skipped))
+    local firstLine = tostring(text or ""):match("([^\r\n]+)") or "empty"
+    local preview = CompactText(firstLine)
+
+    Print("No quest data imported. Paste AutoCallboard export text containing ACBQUESTS1, ACBQUESTS2, or ACBQUESTS3. First line: " .. preview)
+    AppendDebugLog("import", "failed imported=0 skipped=" .. tostring(skipped) .. " first=\"" .. preview .. "\"")
+    ShowDebugWindow()
     return
   end
 
@@ -3294,6 +3340,90 @@ local function ImportQuestDataFromText(text)
 
   if questWindow and questWindow:IsShown() then
     UpdateQuestWindow()
+  end
+end
+
+function AutoCallboardRuntime.LogQuestImportDiagnostics(text, source, imported, skipped)
+  local info = Core.analyzeQuestImportText(text)
+
+  AppendDebugLog("import-debug", "source=" .. tostring(source or "unknown") .. " length=" .. tostring(info.textLength) .. " lines=" .. tostring(info.lineCount) .. " nonempty=" .. tostring(info.nonEmptyLineCount) .. " marker=" .. tostring(info.marker or "none") .. " markerLine=" .. tostring(info.markerLine) .. " dataLines=" .. tostring(info.dataLineCount) .. " importableLines=" .. tostring(info.importableLineCount) .. " invalidLines=" .. tostring(info.invalidLineCount) .. " imported=" .. tostring(imported or "n/a") .. " skipped=" .. tostring(skipped or "n/a") .. " first=\"" .. CompactText(info.firstLine) .. "\"")
+
+  for i = 1, table.getn(info.samples or {}) do
+    local sample = info.samples[i]
+    AppendDebugLog("import-debug", "sample" .. tostring(i) .. " line=" .. tostring(sample.line) .. " len=" .. tostring(sample.length) .. " marker=" .. tostring(sample.marker) .. " v3Sep=" .. tostring(sample.v3Separators) .. " v2Sep=" .. tostring(sample.v2Separators) .. " slashSep=" .. tostring(sample.slashSeparators) .. " tabSep=" .. tostring(sample.tabSeparators) .. " v3Fields=" .. tostring(sample.v3Fields) .. " v2Fields=" .. tostring(sample.v2Fields) .. " slashFields=" .. tostring(sample.slashFields) .. " tabFields=" .. tostring(sample.v1Fields) .. " activeFields=" .. tostring(sample.activeFields) .. " importable=" .. tostring(sample.importable) .. " text=\"" .. CompactText(sample.preview) .. "\"")
+  end
+
+  if info.stoppedAtFence then
+    AppendDebugLog("import-debug", "stopped at closing code fence")
+  end
+end
+
+function AutoCallboardRuntime.ExportQuestDataText(source)
+  CaptureCurrentObjectives()
+
+  local text = Core.exportKnownQuestText(state.knownQuests)
+  local info = Core.analyzeQuestImportText(text)
+
+  AppendDebugLog("export-debug", "source=" .. tostring(source or "unknown") .. " known=" .. tostring(table.getn(state.knownQuests or {})) .. " length=" .. tostring(string.len(text)) .. " lines=" .. tostring(info.lineCount) .. " marker=" .. tostring(info.marker or "none") .. " dataLines=" .. tostring(info.dataLineCount) .. " importableLines=" .. tostring(info.importableLineCount) .. " invalidLines=" .. tostring(info.invalidLineCount))
+
+  for i = 1, table.getn(info.samples or {}) do
+    local sample = info.samples[i]
+    AppendDebugLog("export-debug", "sample" .. tostring(i) .. " line=" .. tostring(sample.line) .. " len=" .. tostring(sample.length) .. " v3Sep=" .. tostring(sample.v3Separators) .. " v2Sep=" .. tostring(sample.v2Separators) .. " slashSep=" .. tostring(sample.slashSeparators) .. " tabSep=" .. tostring(sample.tabSeparators) .. " activeFields=" .. tostring(sample.activeFields) .. " importable=" .. tostring(sample.importable) .. " text=\"" .. CompactText(sample.preview) .. "\"")
+  end
+
+  return text
+end
+
+function AutoCallboardRuntime.SyncQuestDataControls()
+  local mode = AutoCallboardRuntime.questDataMode
+  local leftButton = mode == "export" and AutoCallboardRuntime.questDataExportButton or AutoCallboardRuntime.questDataImportButton
+  local rightButton = mode == "export" and AutoCallboardRuntime.questDataSelectButton or AutoCallboardRuntime.questDataClearButton
+
+  if AutoCallboardRuntime.questDataExportButton then
+    if mode == "export" then
+      AutoCallboardRuntime.questDataExportButton:Show()
+    else
+      AutoCallboardRuntime.questDataExportButton:Hide()
+    end
+  end
+
+  if AutoCallboardRuntime.questDataImportButton then
+    if mode == "import" then
+      AutoCallboardRuntime.questDataImportButton:Show()
+    else
+      AutoCallboardRuntime.questDataImportButton:Hide()
+    end
+  end
+
+  if AutoCallboardRuntime.questDataSelectButton then
+    if mode == "export" then
+      AutoCallboardRuntime.questDataSelectButton:Show()
+    else
+      AutoCallboardRuntime.questDataSelectButton:Hide()
+    end
+  end
+
+  if AutoCallboardRuntime.questDataClearButton then
+    if mode == "import" then
+      AutoCallboardRuntime.questDataClearButton:Show()
+    else
+      AutoCallboardRuntime.questDataClearButton:Hide()
+    end
+  end
+
+  if leftButton and leftButton.ClearAllPoints then
+    leftButton:ClearAllPoints()
+    leftButton:SetPoint("BOTTOMLEFT", dataWindow, "BOTTOMLEFT", 24, 22)
+  end
+
+  if rightButton and rightButton.ClearAllPoints and leftButton then
+    rightButton:ClearAllPoints()
+    rightButton:SetPoint("LEFT", leftButton, "RIGHT", 8, 0)
+  end
+
+  if AutoCallboardRuntime.questDataSelectionText and AutoCallboardRuntime.questDataSelectionText.ClearAllPoints then
+    AutoCallboardRuntime.questDataSelectionText:ClearAllPoints()
+    AutoCallboardRuntime.questDataSelectionText:SetPoint("LEFT", rightButton or leftButton, "RIGHT", 12, 0)
   end
 end
 
@@ -3334,6 +3464,13 @@ local function ShowQuestDataWindow(mode)
     scrollFrame:SetPoint("BOTTOMRIGHT", dataWindow, "BOTTOMRIGHT", -36, 54)
     SkinScrollPanel(scrollFrame)
     SkinScrollBar(scrollFrame)
+    AutoCallboardRuntime.questDataScrollFrame = scrollFrame
+    AutoCallboardRuntime.questDataSelectionOverlay = scrollFrame:CreateTexture(nil, "ARTWORK")
+    AutoCallboardRuntime.questDataSelectionOverlay:SetTexture(WHITE8X8)
+    AutoCallboardRuntime.questDataSelectionOverlay:SetPoint("TOPLEFT", scrollFrame, "TOPLEFT", 3, -3)
+    AutoCallboardRuntime.questDataSelectionOverlay:SetPoint("BOTTOMRIGHT", scrollFrame, "BOTTOMRIGHT", -22, 3)
+    AutoCallboardRuntime.questDataSelectionOverlay:SetVertexColor(THEME.selection[1], THEME.selection[2], THEME.selection[3], THEME.selection[4] or 0.28)
+    AutoCallboardRuntime.questDataSelectionOverlay:Hide()
 
     dataEditBox = CreateFrame("EditBox", "AutoCallboardQuestDataEditBox", scrollFrame)
     dataEditBox:SetMultiLine(true)
@@ -3341,8 +3478,40 @@ local function ShowQuestDataWindow(mode)
     dataEditBox:SetFontObject(ChatFontNormal)
     dataEditBox:SetWidth(650)
     dataEditBox:SetHeight(330)
-    SkinEditBox(dataEditBox)
-    ApplyColor(dataEditBox, "SetBackdropColor", THEME.bg)
+    if dataEditBox.SetTextInsets then
+      dataEditBox:SetTextInsets(3, 3, 3, 3)
+    end
+    StripFrameTextures(dataEditBox)
+    if dataEditBox.SetTextColor then
+      dataEditBox:SetTextColor(THEME.text[1], THEME.text[2], THEME.text[3])
+    end
+    if dataEditBox.SetBackdrop then
+      dataEditBox:SetBackdrop(nil)
+    end
+    dataEditBox:SetScript("OnTextChanged", function(self)
+      if AutoCallboardRuntime.questDataEditBoxUpdating then
+        return
+      end
+
+      if AutoCallboardRuntime.questDataMode == "export" then
+        AutoCallboardRuntime.questDataEditBoxUpdating = true
+        self:SetText(AutoCallboardRuntime.questDataReadOnlyText or "")
+        AutoCallboardRuntime.questDataEditBoxUpdating = false
+        AutoCallboardRuntime.SelectQuestDataText()
+      else
+        AutoCallboardRuntime.SetQuestDataSelectionVisible(false)
+      end
+      end)
+    dataEditBox:SetScript("OnEditFocusGained", function()
+      if AutoCallboardRuntime.questDataMode == "export" then
+        AutoCallboardRuntime.SelectQuestDataText(true)
+      end
+      end)
+    dataEditBox:SetScript("OnMouseUp", function()
+      if AutoCallboardRuntime.questDataMode == "export" then
+        AutoCallboardRuntime.SelectQuestDataText()
+      end
+      end)
     dataEditBox:SetScript("OnEscapePressed", function(self)
       self:ClearFocus()
       dataWindow:Hide()
@@ -3355,11 +3524,12 @@ local function ShowQuestDataWindow(mode)
     exportButton:SetText("Export")
     exportButton:SetPoint("BOTTOMLEFT", dataWindow, "BOTTOMLEFT", 24, 22)
     SkinButton(exportButton)
+    AutoCallboardRuntime.questDataExportButton = exportButton
     exportButton:SetScript("OnClick", function()
-      CaptureCurrentObjectives()
-      SetQuestDataText(Core.exportKnownQuestText(state.knownQuests))
-      dataEditBox:SetFocus()
-      dataEditBox:HighlightText()
+      AutoCallboardRuntime.questDataMode = "export"
+      AutoCallboardRuntime.SyncQuestDataControls()
+      SetQuestDataText(AutoCallboardRuntime.ExportQuestDataText("button"))
+      AutoCallboardRuntime.SelectQuestDataText()
       end)
 
     local importButton = CreateFrame("Button", nil, dataWindow, "UIPanelButtonTemplate")
@@ -3368,6 +3538,7 @@ local function ShowQuestDataWindow(mode)
     importButton:SetText("Import")
     importButton:SetPoint("LEFT", exportButton, "RIGHT", 8, 0)
     SkinButton(importButton)
+    AutoCallboardRuntime.questDataImportButton = importButton
     importButton:SetScript("OnClick", function()
       ImportQuestDataFromText(dataEditBox:GetText() or "")
       end)
@@ -3378,9 +3549,9 @@ local function ShowQuestDataWindow(mode)
     selectButton:SetText("Select All")
     selectButton:SetPoint("LEFT", importButton, "RIGHT", 8, 0)
     SkinButton(selectButton)
+    AutoCallboardRuntime.questDataSelectButton = selectButton
     selectButton:SetScript("OnClick", function()
-      dataEditBox:SetFocus()
-      dataEditBox:HighlightText()
+      AutoCallboardRuntime.SelectQuestDataText()
       end)
 
     local clearButton = CreateFrame("Button", nil, dataWindow, "UIPanelButtonTemplate")
@@ -3389,15 +3560,25 @@ local function ShowQuestDataWindow(mode)
     clearButton:SetText("Clear")
     clearButton:SetPoint("LEFT", selectButton, "RIGHT", 8, 0)
     SkinButton(clearButton)
+    AutoCallboardRuntime.questDataClearButton = clearButton
     clearButton:SetScript("OnClick", function()
+      AutoCallboardRuntime.questDataMode = "import"
+      AutoCallboardRuntime.SyncQuestDataControls()
       SetQuestDataText("")
       dataEditBox:SetFocus()
       end)
+
+    AutoCallboardRuntime.questDataSelectionText = dataWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    AutoCallboardRuntime.questDataSelectionText:SetPoint("LEFT", clearButton, "RIGHT", 12, 0)
+    AutoCallboardRuntime.questDataSelectionText:SetText("Selected - Ctrl+C to copy")
+    SkinHeadingText(AutoCallboardRuntime.questDataSelectionText)
+    AutoCallboardRuntime.questDataSelectionText:Hide()
   end
 
+  AutoCallboardRuntime.questDataMode = mode
+  AutoCallboardRuntime.SyncQuestDataControls()
   if mode == "export" then
-    CaptureCurrentObjectives()
-    SetQuestDataText(Core.exportKnownQuestText(state.knownQuests))
+    SetQuestDataText(AutoCallboardRuntime.ExportQuestDataText("open"))
   elseif mode == "import" then
     SetQuestDataText("")
   end
@@ -3409,7 +3590,7 @@ local function ShowQuestDataWindow(mode)
   dataEditBox:SetFocus()
 
   if mode == "export" then
-    dataEditBox:HighlightText()
+    AutoCallboardRuntime.SelectQuestDataText()
   end
 end
 
@@ -3624,12 +3805,9 @@ function AutoCallboardRuntime.GetActiveQuestTypeFilterNames()
 end
 
 function AutoCallboardRuntime.SyncKnownQuestTypeButtons()
-  local activeCount = AutoCallboardRuntime.CountActiveQuestTypeFilters()
-  local showAll = activeCount == 0
-
   for i = 1, table.getn(AutoCallboardRuntime.knownQuestTypeButtons) do
     local checkbox = AutoCallboardRuntime.knownQuestTypeButtons[i]
-    local isChecked = showAll or AutoCallboardRuntime.knownQuestTypeFilters[checkbox._acbQuestType] == true
+    local isChecked = AutoCallboardRuntime.knownQuestTypeFilters[checkbox._acbQuestType] == true
 
     checkbox:SetChecked(isChecked)
     SetCheckboxVisual(checkbox)
@@ -3637,14 +3815,12 @@ function AutoCallboardRuntime.SyncKnownQuestTypeButtons()
 end
 
 function AutoCallboardRuntime.SetKnownQuestTypeFilter(questType)
-  local activeCount, lastQuestType = AutoCallboardRuntime.CountActiveQuestTypeFilters()
+  AutoCallboardRuntime.knownQuestTypeFilters = AutoCallboardRuntime.knownQuestTypeFilters or {}
 
-  if activeCount == 1 and lastQuestType == questType then
-    AutoCallboardRuntime.knownQuestTypeFilters = {}
+  if AutoCallboardRuntime.knownQuestTypeFilters[questType] == true then
+    AutoCallboardRuntime.knownQuestTypeFilters[questType] = nil
   else
-    AutoCallboardRuntime.knownQuestTypeFilters = {
-      [questType] = true,
-    }
+    AutoCallboardRuntime.knownQuestTypeFilters[questType] = true
   end
 
   AutoCallboardRuntime.SyncKnownQuestTypeButtons()
@@ -3656,8 +3832,10 @@ local function FilterKnownQuests()
   local quests = state and state.knownQuests or {}
 
   for i = 1, table.getn(quests) do
-    if Core.questMatchesTypeFilter(quests[i], AutoCallboardRuntime.knownQuestTypeFilters) and QuestMatchesSearch(quests[i], questSearchText) then
-      table.insert(filtered, quests[i])
+    local quest = quests[i]
+
+    if Core.questMatchesKnownFilter(quest, AutoCallboardRuntime.knownQuestTypeFilters, state and state.desiredQuests) and QuestMatchesSearch(quest, questSearchText) then
+      table.insert(filtered, quest)
     end
   end
 
@@ -3821,6 +3999,33 @@ function AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
   SetCheckboxVisual(checkbox)
 end
 
+function AutoCallboardRuntime.SyncOverlayFrameLevels()
+  local referenceFrame = _G and _G.ObjectivesMainFrame or nil
+  local referenceLevel = 20
+
+  if referenceFrame and referenceFrame.GetFrameLevel then
+    referenceLevel = referenceFrame:GetFrameLevel() or referenceLevel
+  end
+
+  if controlFrame then
+    if controlFrame.SetFrameStrata then
+      controlFrame:SetFrameStrata("HIGH")
+    end
+    if controlFrame.SetFrameLevel then
+      controlFrame:SetFrameLevel(referenceLevel + 20)
+    end
+  end
+
+  if questWindow then
+    if questWindow.SetFrameStrata then
+      questWindow:SetFrameStrata("HIGH")
+    end
+    if controlFrame and questWindow.SetFrameLevel then
+      questWindow:SetFrameLevel((controlFrame:GetFrameLevel() or referenceLevel + 20) + 1)
+    end
+  end
+end
+
 local function RefreshRollButtonMacroState(target)
   if not target or not target._acbRollToggle or not target.SetAttribute then
     return
@@ -3937,7 +4142,7 @@ local function GetKnownMaxScrollOffset()
   return math.max(0, knownCount - KNOWN_ROWS)
 end
 
-local function SetKnownScrollOffset(value)
+SetKnownScrollOffset = function(value)
   local maxOffset = GetKnownMaxScrollOffset()
   local nextOffset = math.max(0, math.min(maxOffset, math.floor((tonumber(value) or 0) + 0.5)))
 
@@ -4045,7 +4250,7 @@ UpdateQuestWindow = function()
     if table.getn(activeTypeNames) > 0 then
       summary = summary .. " | Showing: " .. table.concat(activeTypeNames, ", ")
     else
-      summary = summary .. " | Types split"
+      summary = summary .. " | Showing: Selected"
     end
 
     AutoCallboardRuntime.knownPageText:SetText(summary)
@@ -4391,6 +4596,7 @@ function AutoCallboardRuntime.CreateQuestWindow()
   if controlFrame and questWindow.SetFrameLevel then
     questWindow:SetFrameLevel(controlFrame:GetFrameLevel() + 1)
   end
+  AutoCallboardRuntime.SyncOverlayFrameLevels()
   questWindow:EnableMouse(true)
   questWindow:SetClampedToScreen(true)
   SkinFrame(questWindow)
@@ -5246,7 +5452,8 @@ local function CreateCallboardButton()
   controlFrame = CreateFrame("Frame", "AutoCallboardFrame", UIParent)
   controlFrame:SetWidth(AutoCallboardRuntime.controlCollapsedWidth)
   controlFrame:SetHeight(AutoCallboardRuntime.controlCollapsedHeight)
-  controlFrame:SetFrameStrata("MEDIUM")
+  controlFrame:SetFrameStrata("HIGH")
+  AutoCallboardRuntime.SyncOverlayFrameLevels()
   controlFrame:SetMovable(true)
   controlFrame:EnableMouse(true)
   controlFrame:RegisterForDrag("LeftButton")
@@ -5261,6 +5468,7 @@ local function CreateCallboardButton()
     end)
   controlFrame:SetScript("OnShow", function()
     AutoCallboardRuntime.SaveControlFrameShown(true)
+    AutoCallboardRuntime.SyncOverlayFrameLevels()
     end)
   controlFrame:SetScript("OnHide", function()
     AutoCallboardRuntime.SaveControlFrameShown(false)
@@ -5448,6 +5656,10 @@ frame:SetScript("OnUpdate", function()
   AutoCallboardRuntime.CheckPendingSummonAttempt()
   AutoCallboardRuntime.SyncPendingSummonCooldown()
   AutoCallboardRuntime.UpdateQuestPanelAnimation()
+  if controlFrame and (not AutoCallboardRuntime.nextLayerSyncAt or GetTime() >= AutoCallboardRuntime.nextLayerSyncAt) then
+    AutoCallboardRuntime.nextLayerSyncAt = GetTime() + 0.5
+    AutoCallboardRuntime.SyncOverlayFrameLevels()
+  end
   WatchCurrentObjectives()
   ProcessRolling()
   RefreshQuestWindowIfNeeded()
