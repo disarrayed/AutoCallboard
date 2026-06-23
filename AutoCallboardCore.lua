@@ -269,6 +269,10 @@ function Core.parseSlash(input)
         return { kind = "reset" }
     end
 
+    if command == "clearquests" or command == "clearquestlist" or command == "clearknownquests" then
+        return { kind = "clearQuestList", confirmed = rest:lower() == "confirm" }
+    end
+
     if command == "name" then
         if rest == "" then
             return { kind = "invalid", message = "Usage: /acb name Callboard" }
@@ -584,6 +588,24 @@ function Core.questMatchesTypeFilter(quest, enabledQuestTypes)
     return enabledQuestTypes[questType] == true
 end
 
+function Core.hasDesiredQuests(desired)
+    if type(desired) ~= "table" then
+        return false
+    end
+
+    for _, enabled in pairs(desired) do
+        if enabled == true then
+            return true
+        end
+    end
+
+    return false
+end
+
+function Core.needsUntargetedRollConfirm(desired)
+    return not Core.hasDesiredQuests(desired)
+end
+
 function Core.questMatchesKnownFilter(quest, enabledQuestTypes, desired)
     if type(enabledQuestTypes) == "table" then
         for _, enabled in pairs(enabledQuestTypes) do
@@ -591,6 +613,10 @@ function Core.questMatchesKnownFilter(quest, enabledQuestTypes, desired)
                 return Core.questMatchesTypeFilter(quest, enabledQuestTypes)
             end
         end
+    end
+
+    if not Core.hasDesiredQuests(desired) then
+        return true
     end
 
     local key = type(quest) == "table" and type(quest.key) == "string" and quest.key or Core.questKey(quest)
@@ -613,6 +639,20 @@ function Core.copyCharacterProfiles(profiles)
     end
 
     return copy
+end
+
+function Core.clearQuestListState(currentState)
+    local nextState = Core.mergeState(currentState)
+
+    nextState.knownQuests = {}
+    nextState.desiredQuests = {}
+    nextState.characterProfiles = Core.copyCharacterProfiles(nextState.characterProfiles)
+
+    for _, profile in pairs(nextState.characterProfiles) do
+        profile.desiredQuests = {}
+    end
+
+    return nextState
 end
 
 function Core.captureKnownQuests(existing, objectives, rollCount)

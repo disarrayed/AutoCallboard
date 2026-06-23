@@ -5,8 +5,8 @@
 Automatic Callboard rolling for Project Ebonhold. Pick the quests you want,
 open a board, and let AutoCallboard stop when one appears.
 
-[![Downloads](https://img.shields.io/badge/downloads-404-b048f8.svg?style=for-the-badge)](https://github.com/disarrayed/AutoCallboard/releases)
-![AutoCallboard 1.0.5](https://img.shields.io/badge/AutoCallboard-1.0.5-4b2e83.svg?style=for-the-badge)
+[![Downloads](https://img.shields.io/badge/downloads-433-b048f8.svg?style=for-the-badge)](https://github.com/disarrayed/AutoCallboard/releases)
+![AutoCallboard 1.0.6](https://img.shields.io/badge/AutoCallboard-1.0.6-4b2e83.svg?style=for-the-badge)
 ![Project Ebonhold 3.3.5a](https://img.shields.io/badge/Project%20Ebonhold-3.3.5a-d1d1f6.svg?style=for-the-badge)
 
 [**Download**](https://github.com/disarrayed/AutoCallboard/releases/latest) · [**Source**](https://github.com/disarrayed/AutoCallboard)
@@ -28,7 +28,7 @@ The normal flow:
 
 1. Open `Quests`.
 2. Check the quests you want AutoCallboard to pick.
-3. Click `Start`.
+3. Click `Start`. If no wanted quest is selected, confirm the warning first.
 4. AutoCallboard checks for board access, then reads Project Ebonhold objective data and rolls.
 5. When a wanted quest appears, it selects the quest and pauses.
 6. AutoCallboard records the accepted quest ID and tries to share that quest
@@ -51,11 +51,13 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 - Known quest list grows as quests appear on the Callboard
 - Known quests are split by quest type
 - Category filters can quickly show only Open World, Dungeon, Raid, Profession, or Other quests
+- With no category filter, the list shows selected quests, or all known quests if nothing is selected
 - Search by quest name or quest info
 - Hover a quest to see the quest details
 
 **Rolling**
 - `Start` rolls until a wanted quest appears
+- With no wanted quest selected, `Start` warns first, then rolls only to learn quests if confirmed
 - `Start` does not summon the Callboard
 - `Start` will not spend a reroll unless board access is detected through UI, board gossip, or the clicked board's `npc` token/object ID
 - `Share` retries the last accepted quest from your quest log
@@ -104,6 +106,7 @@ Rerolls cost gold. If you pick rare quests, AutoCallboard may roll many times, a
 /acb autoacceptquests on|off  Turn Auto Accept Quests on or off
 /acb export      Export known quest data
 /acb import      Import known quest data
+/acb clearquests confirm  Clear learned quests and selected quest picks
 /acb debug       Open the copyable debug log
 /acb cooldown    Add cooldown details to the debug log
 /acb sniff on    Record board interaction evidence in the debug log

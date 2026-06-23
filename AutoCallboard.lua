@@ -862,7 +862,7 @@ local function GetHelpText()
     "Helpful buttons:",
     "",
     "- " .. HelpName("Callboard") .. ": opens a nearby board, or casts the summon.",
-    "- " .. HelpName("Start") .. ": kicks off rolling and flips to Stop while running.",
+    "- " .. HelpName("Start") .. ": kicks off rolling; asks first if no wanted quest is selected.",
     "- " .. HelpName("Share") .. ": pushes your most recently accepted quest again.",
     "- Accepted quest chat output includes the gold spent to land that quest.",
     "- " .. HelpName("Auto Accept Quests") .. ": accepts quests shared by party or raid members.",
@@ -870,6 +870,7 @@ local function GetHelpText()
     "- " .. HelpName("Search") .. ": narrows the known list by title, objective, type, or reward.",
     "- " .. HelpName("Select") .. ": grabs one of the quests currently showing on the board.",
     "- " .. HelpName("Export") .. " / " .. HelpName("Import") .. ": copies the learned quest list in or out.",
+    "- " .. HelpName("/acb clearquests confirm") .. ": clears learned quests and selected quest picks.",
   }
 
   return table.concat(lines, "\n")
@@ -1636,12 +1637,43 @@ local function CountDesiredQuests()
   return count
 end
 
+function AutoCallboardRuntime.CanRollWithoutWantedQuest()
+  return AutoCallboardRuntime.learningQuestList == true
+end
+
 local function SetQuestStatus(message)
   if questStatusText then
     questStatusText:SetText(message)
   end
 
   AppendDebugLog("quest", message)
+end
+
+function AutoCallboardRuntime.ConfirmUntargetedRoll()
+  if not StaticPopupDialogs or not StaticPopup_Show then
+    SetQuestStatus("Cannot show untargeted roll confirmation.")
+    Print("Cannot show the Yes/No warning, so AutoCallboard did not start rolling.")
+    return
+  end
+
+  StaticPopupDialogs.AUTOCALLBOARD_CONFIRM_UNTARGETED_ROLL = StaticPopupDialogs.AUTOCALLBOARD_CONFIRM_UNTARGETED_ROLL or {
+    text = "No wanted quest is selected. AutoCallboard will spend rerolls only to learn quests and will not stop on a target. Continue?",
+    button1 = "Yes",
+    button2 = "No",
+    OnAccept = function()
+      StartRolling(true)
+    end,
+    OnCancel = function()
+      SetQuestStatus("Untargeted rolling canceled.")
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+  }
+
+  SetQuestStatus("Confirm untargeted rolling.")
+  StaticPopup_Show("AUTOCALLBOARD_CONFIRM_UNTARGETED_ROLL")
 end
 
 local function RequireActiveCallboard(action)
@@ -2297,6 +2329,7 @@ StopRolling = function(message)
   AutoCallboardRuntime.trackedGoldAt = nil
   AutoCallboardRuntime.trackedQuestSpend = 0
   selectedQuest = nil
+  AutoCallboardRuntime.learningQuestList = false
   nextSelectedQuestCheckAt = nil
   AutoCallboardRuntime.blockedMatchKey = nil
 
@@ -2475,7 +2508,7 @@ local function ProcessRolling()
     return
   end
 
-  if CountDesiredQuests() == 0 then
+  if CountDesiredQuests() == 0 and not AutoCallboardRuntime.CanRollWithoutWantedQuest() then
     SetRollPause("no_wanted", "Paused: pick at least one wanted quest.")
     return
   end
@@ -2550,7 +2583,11 @@ local function ProcessRolling()
   end
 
   if rollCount >= state.maxRerolls then
-    StopRolling("Stopped after " .. tostring(rollCount) .. " reroll(s). No wanted quest found.")
+    if AutoCallboardRuntime.learningQuestList then
+      StopRolling("Stopped after " .. tostring(rollCount) .. " reroll(s). Learned " .. tostring(table.getn(state.knownQuests or {})) .. " quest(s).")
+    else
+      StopRolling("Stopped after " .. tostring(rollCount) .. " reroll(s). No wanted quest found.")
+    end
     return
   end
 
@@ -2611,10 +2648,11 @@ local function WatchCurrentObjectives()
   end
 end
 
-StartRolling = function()
-  if CountDesiredQuests() == 0 then
-    SetQuestStatus("Pick at least one wanted quest first.")
-    Print("Pick at least one wanted quest first. Use /acb quests if you need the list.")
+StartRolling = function(confirmedUntargeted)
+  local desiredCount = CountDesiredQuests()
+
+  if Core.needsUntargetedRollConfirm(state and state.desiredQuests) and not confirmedUntargeted then
+    AutoCallboardRuntime.ConfirmUntargetedRoll()
     return
   end
 
@@ -2640,6 +2678,7 @@ StartRolling = function()
   nextSelectedQuestCheckAt = nil
   pendingReroll = false
   AutoCallboardRuntime.blockedMatchKey = nil
+  AutoCallboardRuntime.learningQuestList = desiredCount == 0
   rolling = true
   nextRollAt = GetTime()
   lastObjectiveSignature = ObjectiveSignature(CaptureCurrentObjectives())
@@ -2661,8 +2700,10 @@ StartRolling = function()
     else
       AutoCallboardRuntime.SetManualBoardOpenRequired("start board guard:" .. tostring(boardAccess.reason))
     end
+  elseif AutoCallboardRuntime.learningQuestList then
+    SetQuestStatus("Rolling to learn quests.")
   elseif not EvaluateCurrentObjectives() then
-    SetQuestStatus("Rolling for " .. tostring(CountDesiredQuests()) .. " wanted quest(s).")
+    SetQuestStatus("Rolling for " .. tostring(desiredCount) .. " wanted quest(s).")
   end
 
   UpdateRollToggleButtons()
@@ -4064,7 +4105,7 @@ end
 local function IsQuestRollStartAvailable()
   local service = GetObjectivesService()
 
-  return CountDesiredQuests() > 0 and service ~= nil
+  return service ~= nil
 end
 
 UpdateRollToggleButtons = function()
@@ -4249,6 +4290,8 @@ UpdateQuestWindow = function()
 
     if table.getn(activeTypeNames) > 0 then
       summary = summary .. " | Showing: " .. table.concat(activeTypeNames, ", ")
+    elseif desiredCount == 0 then
+      summary = summary .. " | Showing: All"
     else
       summary = summary .. " | Showing: Selected"
     end
@@ -4267,7 +4310,7 @@ UpdateQuestWindow = function()
     AutoCallboardRuntime.questGoldText:SetText("Gold spent | total " .. FormatMoney(totalSpent) .. " | last quest " .. FormatMoney(lastQuestSpent) .. " | current run " .. FormatMoney(currentSpend))
   end
 
-  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, desiredCount > 0 and service ~= nil)
+  UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, service ~= nil)
   UpdateRollToggleButtonState(controlFrame and controlFrame.startButton or nil, true)
   AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
 
@@ -4285,6 +4328,8 @@ UpdateQuestWindow = function()
       questStatusText:SetText("Paused: selected " .. tostring(selectedQuest.title or "quest") .. summonSummary)
     elseif rolling and rollPausedReason then
       questStatusText:SetText(tostring(rollPauseMessage or ("Paused: " .. rollPausedReason)) .. summonSummary)
+    elseif rolling and AutoCallboardRuntime.learningQuestList then
+      questStatusText:SetText("Learning quests... " .. tostring(rollCount) .. "/" .. tostring(state.maxRerolls) .. summonSummary)
     elseif rolling then
       questStatusText:SetText("Rolling... " .. tostring(rollCount) .. "/" .. tostring(state.maxRerolls) .. " | wanted " .. tostring(desiredCount) .. summonSummary)
     else
@@ -5304,6 +5349,26 @@ function AutoCallboardRuntime.SetField(field, value)
   end
 end
 
+function AutoCallboardRuntime.ClearQuestList(confirmed)
+  if not confirmed then
+    Print("This clears learned quests and selected quest picks. Use /acb clearquests confirm to continue.")
+    return
+  end
+
+  local knownCount = table.getn(state and state.knownQuests or {})
+  local desiredCount = CountDesiredQuests()
+
+  ApplyState(Core.clearQuestListState(state))
+  knownScrollOffset = 0
+
+  if questWindow and questWindow:IsShown() then
+    UpdateQuestWindow()
+  end
+
+  Print("Cleared " .. tostring(knownCount) .. " known quest(s) and " .. tostring(desiredCount) .. " selected quest(s).")
+  AppendDebugLog("quest", "cleared known quest list known=" .. tostring(knownCount) .. " selected=" .. tostring(desiredCount))
+end
+
 local function HandleSlash(input)
   local parsed = Core.parseSlash(input)
 
@@ -5332,6 +5397,8 @@ local function HandleSlash(input)
     PositionButton()
     controlFrame:Show()
     Print("Settings reset.")
+  elseif parsed.kind == "clearQuestList" then
+    AutoCallboardRuntime.ClearQuestList(parsed.confirmed)
   elseif parsed.kind == "set" then
     AutoCallboardRuntime.SetField(parsed.field, parsed.value)
   elseif parsed.kind == "reroll" then
