@@ -2,7 +2,7 @@
 ## Title: |cffb048f8AutoCallboard|r
 ## Notes: Automates Callboard rolling and selection for wanted quests.
 ## Author: Disarray
-## Version: 1.0.7
+## Version: 1.0.8
 ## SavedVariables: AutoCallboardDB, AutoCallboardDebugLog
 
 AutoCallboardCore.lua

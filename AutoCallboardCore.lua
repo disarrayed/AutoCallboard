@@ -11,6 +11,7 @@ local DEFAULTS = {
     objectiveButtonField = "selectBtn",
     autoAccept = true,
     autoAcceptShared = false,
+    autoCurrentInstanceQuest = false,
     autoSelect = false,
     maxRerolls = 50,
     rerollDelay = 1.6,
@@ -87,6 +88,26 @@ local function containsAny(value, needles)
     return false
 end
 
+local function normalizeMatchText(value)
+    value = string.lower(trim(value))
+    value = value:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    value = value:gsub("[^%w]+", " ")
+    value = value:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+
+    return value
+end
+
+local function appendUniqueNormalized(values, seen, value)
+    value = normalizeMatchText(value)
+
+    if value == "" or seen[value] then
+        return
+    end
+
+    seen[value] = true
+    table.insert(values, value)
+end
+
 local PROFESSION_HINTS = {
     "bulk order:",
     "crafting materials:",
@@ -133,6 +154,37 @@ local DUNGEON_HINTS = {
     "the nexus ",
 }
 
+local CURRENT_INSTANCE_ALIASES = {
+    ["utgarde keep"] = { "utgarde keep", "ingvar", "ingvar the plunderer" },
+    ["utgarde pinnacle"] = { "utgarde pinnacle", "king ymiron", "ymiron" },
+    ["azjol nerub"] = { "azjol nerub", "anub arak" },
+    ["the oculus"] = { "the oculus", "oculus", "ley guardian eregos", "eregos" },
+    ["oculus"] = { "the oculus", "oculus", "ley guardian eregos", "eregos" },
+    ["halls of lightning"] = { "halls of lightning", "loken" },
+    ["halls of stone"] = { "halls of stone", "sjonnir", "sjonnir the ironshaper" },
+    ["the culling of stratholme"] = { "the culling of stratholme", "culling of stratholme", "mal ganis" },
+    ["culling of stratholme"] = { "the culling of stratholme", "culling of stratholme", "mal ganis" },
+    ["drak tharon keep"] = { "drak tharon keep", "prophet tharon ja", "the prophet tharon ja", "tharon ja" },
+    ["gundrak"] = { "gundrak", "gal darah" },
+    ["ahn kahet the old kingdom"] = { "ahn kahet", "old kingdom", "herald volazj" },
+    ["ahn kahet"] = { "ahn kahet", "old kingdom", "herald volazj" },
+    ["the violet hold"] = { "the violet hold", "violet hold", "cyanigosa" },
+    ["violet hold"] = { "the violet hold", "violet hold", "cyanigosa" },
+    ["the nexus"] = { "the nexus", "keristrasza" },
+    ["nexus"] = { "the nexus", "keristrasza" },
+    ["trial of the champion"] = { "trial of the champion", "the black knight", "black knight" },
+    ["the forge of souls"] = { "the forge of souls", "forge of souls", "devourer of souls" },
+    ["forge of souls"] = { "the forge of souls", "forge of souls", "devourer of souls" },
+    ["pit of saron"] = { "pit of saron", "overlord tyrannus", "tyrannus" },
+    ["halls of reflection"] = { "halls of reflection", "escaped from arthas", "marwyn", "falric" },
+    ["naxxramas"] = { "naxxramas", "kel thuzad", "kelthuzad" },
+    ["the eye of eternity"] = { "the eye of eternity", "eye of eternity", "malygos" },
+    ["eye of eternity"] = { "the eye of eternity", "eye of eternity", "malygos" },
+    ["the obsidian sanctum"] = { "the obsidian sanctum", "obsidian sanctum", "sartharion" },
+    ["obsidian sanctum"] = { "the obsidian sanctum", "obsidian sanctum", "sartharion" },
+    ["vault of archavon"] = { "vault of archavon", "toravon", "archavon", "emalon", "koralon" },
+}
+
 local OPEN_WORLD_TITLE_PREFIXES = {
     "a growing menace:",
     "clear the roads",
@@ -154,6 +206,7 @@ local function copyDefaults()
         objectiveButtonField = DEFAULTS.objectiveButtonField,
         autoAccept = DEFAULTS.autoAccept,
         autoAcceptShared = DEFAULTS.autoAcceptShared,
+        autoCurrentInstanceQuest = DEFAULTS.autoCurrentInstanceQuest,
         autoSelect = DEFAULTS.autoSelect,
         maxRerolls = DEFAULTS.maxRerolls,
         rerollDelay = DEFAULTS.rerollDelay,
@@ -237,6 +290,10 @@ function Core.mergeState(saved)
         state.autoAcceptShared = saved.autoAcceptShared
     elseif type(saved.autoAcceptSharedBoard) == "boolean" then
         state.autoAcceptShared = saved.autoAcceptSharedBoard
+    end
+
+    if type(saved.autoCurrentInstanceQuest) == "boolean" then
+        state.autoCurrentInstanceQuest = saved.autoCurrentInstanceQuest
     end
 
     if type(saved.autoSelect) == "boolean" then
@@ -454,6 +511,20 @@ function Core.parseSlash(input)
         end
 
         return { kind = "invalid", message = "Usage: /acb autoacceptquests on, or /acb autoacceptquests off" }
+    end
+
+    if command == "autoinstance" or command == "currentinstance" or command == "instancequest" then
+        local lowered = rest:lower()
+
+        if lowered == "on" or lowered == "true" or lowered == "yes" then
+            return { kind = "set", field = "autoCurrentInstanceQuest", value = true }
+        end
+
+        if lowered == "off" or lowered == "false" or lowered == "no" then
+            return { kind = "set", field = "autoCurrentInstanceQuest", value = false }
+        end
+
+        return { kind = "invalid", message = "Usage: /acb autoinstance on, or /acb autoinstance off" }
     end
 
     if command == "quests" or command == "quest" then
@@ -1325,6 +1396,125 @@ function Core.toggleDesired(desired, key, enabled)
     end
 
     return copy
+end
+
+function Core.currentInstanceQuestType(instanceType)
+    instanceType = normalizeMatchText(instanceType)
+
+    if instanceType == "party" then
+        return 2
+    end
+
+    if instanceType == "raid" then
+        return 3
+    end
+
+    return 0
+end
+
+function Core.buildCurrentInstanceTarget(info)
+    if type(info) ~= "table" then
+        return nil
+    end
+
+    local questType = Core.sanitizeQuestType(info.questType)
+    if questType == 0 then
+        questType = Core.currentInstanceQuestType(info.instanceType)
+    end
+
+    if questType ~= 2 and questType ~= 3 then
+        return nil
+    end
+
+    local aliases = {}
+    local seen = {}
+    appendUniqueNormalized(aliases, seen, info.name)
+    appendUniqueNormalized(aliases, seen, info.realZoneText)
+    appendUniqueNormalized(aliases, seen, info.zoneText)
+    appendUniqueNormalized(aliases, seen, info.minimapZoneText)
+
+    if type(info.names) == "table" then
+        for i = 1, table.getn(info.names) do
+            appendUniqueNormalized(aliases, seen, info.names[i])
+        end
+    end
+
+    if type(info.aliases) == "table" then
+        for i = 1, table.getn(info.aliases) do
+            appendUniqueNormalized(aliases, seen, info.aliases[i])
+        end
+    end
+
+    local originalCount = table.getn(aliases)
+    for i = 1, originalCount do
+        local mappedAliases = CURRENT_INSTANCE_ALIASES[aliases[i]]
+        if type(mappedAliases) == "table" then
+            for j = 1, table.getn(mappedAliases) do
+                appendUniqueNormalized(aliases, seen, mappedAliases[j])
+            end
+        end
+    end
+
+    if table.getn(aliases) == 0 then
+        return nil
+    end
+
+    return {
+        instanceType = trim(info.instanceType),
+        name = trim(info.name) ~= "" and trim(info.name) or aliases[1],
+        questType = questType,
+        aliases = aliases,
+    }
+end
+
+function Core.questMatchesCurrentInstance(quest, target)
+    target = Core.buildCurrentInstanceTarget(target)
+
+    if type(quest) ~= "table" or not target then
+        return false
+    end
+
+    local _, questType = Core.objectiveMetadata(quest)
+    if questType ~= target.questType then
+        return false
+    end
+
+    local combined = normalizeMatchText(Core.questTitle(quest) .. " " .. Core.objectiveText(quest))
+
+    for i = 1, table.getn(target.aliases) do
+        local alias = target.aliases[i]
+        if alias ~= "" and string.find(combined, alias, 1, true) then
+            return true, alias
+        end
+    end
+
+    return false
+end
+
+function Core.findCurrentInstanceObjective(objectives, target)
+    target = Core.buildCurrentInstanceTarget(target)
+
+    if not Core.isObjectiveChoiceList(objectives) or not target then
+        return nil
+    end
+
+    for i = 1, table.getn(objectives) do
+        local matched, alias = Core.questMatchesCurrentInstance(objectives[i], target)
+        if matched then
+            return {
+                index = i,
+                key = Core.questKey(objectives[i]),
+                quest = objectives[i],
+                source = "currentInstance",
+                label = "current instance quest",
+                matchedAlias = alias,
+                questType = target.questType,
+                target = target,
+            }
+        end
+    end
+
+    return nil
 end
 
 function Core.findDesiredObjective(objectives, desired)

@@ -72,6 +72,17 @@ local QUEST_WATCH_INTERVAL = 0.5
 local ROLL_EVAL_INTERVAL = 0.5
 local BOARD_TARGET_PRIMARY_NAMES = { "Objectives Board", "Objective Board" }
 local BOARD_OBJECT_IDS = { [600600] = true }
+local QUEST_TYPE_NAMES = {
+  [1] = "Open World",
+  [2] = "Dungeon",
+  [3] = "Raid",
+  [4] = "Profession",
+}
+
+local function GetQuestTypeName(questType)
+  questType = tonumber(questType) or 0
+  return QUEST_TYPE_NAMES[questType] or "Other"
+end
 
 AutoCallboardRuntime.controlCollapsedWidth = 300
 AutoCallboardRuntime.controlCollapsedHeight = 84
@@ -863,6 +874,7 @@ local function GetHelpText()
     "",
     "- " .. HelpName("Callboard") .. ": opens a nearby board, or casts the summon.",
     "- " .. HelpName("Start") .. ": kicks off rolling; asks first if no wanted quest is selected.",
+    "- " .. HelpName("Auto Current Instance") .. ": inside a dungeon or raid, rolls for that instance's board quest.",
     "- " .. HelpName("Share") .. ": pushes your most recently accepted quest again.",
     "- Accepted quest chat output includes the gold spent to land that quest.",
     "- " .. HelpName("Auto Accept Quests") .. ": accepts quests shared by party or raid members.",
@@ -2351,9 +2363,10 @@ local function HandleMatch(match)
 
   local title = Core.questTitle(match.quest)
   local matchKey = tostring(match.index) .. ":" .. tostring(match.key)
+  local matchLabel = match.label or "wanted quest"
 
   if not AutoCallboardRuntime.IsCallboardReadyForQuestActions() then
-    SetRollPause("no_callboard", "Found wanted quest: " .. title .. ". Waiting for Callboard.")
+    SetRollPause("no_callboard", "Found " .. matchLabel .. ": " .. title .. ". Waiting for Callboard.")
     nextRollAt = GetTime() + ROLL_EVAL_INTERVAL
 
     if AutoCallboardRuntime.blockedMatchKey ~= matchKey then
@@ -2361,24 +2374,31 @@ local function HandleMatch(match)
       AppendDebugLog("quest", "hard stop on wanted quest slot=" .. tostring(match.index) .. " key=" .. tostring(match.key) .. " title=" .. title)
       AppendDebugLog("quest", "matched wanted quest but callboard ui is not ready")
     end
-  elseif SelectObjectiveIndex(match.index) then
-    AutoCallboardRuntime.blockedMatchKey = nil
-    AppendDebugLog("quest", "hard stop on wanted quest slot=" .. tostring(match.index) .. " key=" .. tostring(match.key) .. " title=" .. title)
-    SetQuestStatus("Found and selected wanted quest: " .. title .. " in slot " .. tostring(match.index) .. ".")
   else
-    local shouldLogBlockedMatch = AutoCallboardRuntime.blockedMatchKey ~= matchKey
-    AutoCallboardRuntime.blockedMatchKey = matchKey
-    nextRollAt = GetTime() + ROLL_EVAL_INTERVAL
-
-    if shouldLogBlockedMatch then
-      AppendDebugLog("quest", "hard stop on wanted quest slot=" .. tostring(match.index) .. " key=" .. tostring(match.key) .. " title=" .. title)
-      AppendDebugLog("quest", "wanted quest selection failed title=" .. tostring(title))
-      SetQuestStatus("Found wanted quest: " .. title .. " in slot " .. tostring(match.index) .. ", but selection failed.")
-    elseif questStatusText then
-      questStatusText:SetText("Found wanted quest: " .. title .. " in slot " .. tostring(match.index) .. ", but selection failed.")
+    if match.source == "currentInstance" and state and state.autoAccept then
+      pendingAcceptUntil = GetTime() + ACCEPT_WINDOW
+      AppendDebugLog("instance", "matched current instance slot=" .. tostring(match.index) .. " alias=" .. tostring(match.matchedAlias or "none") .. " title=" .. title)
     end
 
-    SetRollPause("no_callboard", "Found wanted quest: " .. title .. ". Waiting for selectable Callboard UI.")
+    if SelectObjectiveIndex(match.index) then
+      AutoCallboardRuntime.blockedMatchKey = nil
+      AppendDebugLog("quest", "hard stop on " .. tostring(match.source or "wanted") .. " quest slot=" .. tostring(match.index) .. " key=" .. tostring(match.key) .. " title=" .. title)
+      SetQuestStatus("Found and selected " .. matchLabel .. ": " .. title .. " in slot " .. tostring(match.index) .. ".")
+    else
+      local shouldLogBlockedMatch = AutoCallboardRuntime.blockedMatchKey ~= matchKey
+      AutoCallboardRuntime.blockedMatchKey = matchKey
+      nextRollAt = GetTime() + ROLL_EVAL_INTERVAL
+
+      if shouldLogBlockedMatch then
+        AppendDebugLog("quest", "hard stop on " .. tostring(match.source or "wanted") .. " quest slot=" .. tostring(match.index) .. " key=" .. tostring(match.key) .. " title=" .. title)
+        AppendDebugLog("quest", matchLabel .. " selection failed title=" .. tostring(title))
+        SetQuestStatus("Found " .. matchLabel .. ": " .. title .. " in slot " .. tostring(match.index) .. ", but selection failed.")
+      elseif questStatusText then
+        questStatusText:SetText("Found " .. matchLabel .. ": " .. title .. " in slot " .. tostring(match.index) .. ", but selection failed.")
+      end
+
+      SetRollPause("no_callboard", "Found " .. matchLabel .. ": " .. title .. ". Waiting for selectable Callboard UI.")
+    end
   end
 
   if UpdateQuestWindow then
@@ -2393,7 +2413,12 @@ EvaluateCurrentObjectives = function()
   end
 
   local objectives = CaptureCurrentObjectives()
-  local match = Core.findDesiredObjective(objectives, state.desiredQuests)
+  local currentInstanceTarget = AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget("evaluate")
+  local match = Core.findCurrentInstanceObjective(objectives, currentInstanceTarget)
+
+  if not match then
+    match = Core.findDesiredObjective(objectives, state.desiredQuests)
+  end
 
   if match then
     HandleMatch(match)
@@ -2508,8 +2533,13 @@ local function ProcessRolling()
     return
   end
 
-  if CountDesiredQuests() == 0 and not AutoCallboardRuntime.CanRollWithoutWantedQuest() then
-    SetRollPause("no_wanted", "Paused: pick at least one wanted quest.")
+  local currentInstanceTarget = AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget("roll")
+  if CountDesiredQuests() == 0 and not currentInstanceTarget and not AutoCallboardRuntime.CanRollWithoutWantedQuest() then
+    if state and state.autoCurrentInstanceQuest then
+      SetRollPause("no_wanted", "Paused: enter a dungeon or raid, or pick at least one wanted quest.")
+    else
+      SetRollPause("no_wanted", "Paused: pick at least one wanted quest.")
+    end
     return
   end
 
@@ -2650,8 +2680,13 @@ end
 
 StartRolling = function(confirmedUntargeted)
   local desiredCount = CountDesiredQuests()
+  local currentInstanceTarget = AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget("start")
+  local autoCurrentInstanceEnabled = state and state.autoCurrentInstanceQuest
 
-  if Core.needsUntargetedRollConfirm(state and state.desiredQuests) and not confirmedUntargeted then
+  if Core.needsUntargetedRollConfirm(state and state.desiredQuests)
+      and not currentInstanceTarget
+      and not autoCurrentInstanceEnabled
+      and not confirmedUntargeted then
     AutoCallboardRuntime.ConfirmUntargetedRoll()
     return
   end
@@ -2678,7 +2713,7 @@ StartRolling = function(confirmedUntargeted)
   nextSelectedQuestCheckAt = nil
   pendingReroll = false
   AutoCallboardRuntime.blockedMatchKey = nil
-  AutoCallboardRuntime.learningQuestList = desiredCount == 0
+  AutoCallboardRuntime.learningQuestList = desiredCount == 0 and not autoCurrentInstanceEnabled
   rolling = true
   nextRollAt = GetTime()
   lastObjectiveSignature = ObjectiveSignature(CaptureCurrentObjectives())
@@ -2700,8 +2735,12 @@ StartRolling = function(confirmedUntargeted)
     else
       AutoCallboardRuntime.SetManualBoardOpenRequired("start board guard:" .. tostring(boardAccess.reason))
     end
+  elseif autoCurrentInstanceEnabled and not currentInstanceTarget and desiredCount == 0 then
+    SetRollPause("no_wanted", "Paused: enter a dungeon or raid, or pick at least one wanted quest.")
   elseif AutoCallboardRuntime.learningQuestList then
     SetQuestStatus("Rolling to learn quests.")
+  elseif currentInstanceTarget and not EvaluateCurrentObjectives() then
+    SetQuestStatus("Rolling for current " .. GetQuestTypeName(currentInstanceTarget.questType) .. ": " .. tostring(currentInstanceTarget.name) .. ".")
   elseif not EvaluateCurrentObjectives() then
     SetQuestStatus("Rolling for " .. tostring(desiredCount) .. " wanted quest(s).")
   end
@@ -3746,13 +3785,6 @@ local function AppendQuestDebugSnapshot()
   end
 end
 
-local QUEST_TYPE_NAMES = {
-  [1] = "Open World",
-  [2] = "Dungeon",
-  [3] = "Raid",
-  [4] = "Profession",
-}
-
 AutoCallboardRuntime.questTypeFilterOptions = {
   { questType = 1, label = "Open World" },
   { questType = 2, label = "Dungeon" },
@@ -3762,11 +3794,6 @@ AutoCallboardRuntime.questTypeFilterOptions = {
 }
 AutoCallboardRuntime.knownQuestTypeButtons = AutoCallboardRuntime.knownQuestTypeButtons or {}
 AutoCallboardRuntime.knownQuestTypeFilters = AutoCallboardRuntime.knownQuestTypeFilters or {}
-
-local function GetQuestTypeName(questType)
-  questType = tonumber(questType) or 0
-  return QUEST_TYPE_NAMES[questType] or "Other"
-end
 
 -- Fields the addon expects the ObjectivesService to deliver on each objective.
 -- Anything present but not listed here is flagged [NEW]; anything required but
@@ -4399,6 +4426,109 @@ function AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
   SetCheckboxVisual(checkbox)
 end
 
+function AutoCallboardRuntime.UpdateAutoCurrentInstanceControl()
+  local checkbox = AutoCallboardRuntime.autoCurrentInstanceCheckbox
+  if not checkbox then
+    return
+  end
+
+  checkbox:SetChecked(state and state.autoCurrentInstanceQuest)
+  SetCheckboxVisual(checkbox)
+end
+
+function AutoCallboardRuntime.GetCurrentInstanceQuestTarget()
+  if not state or not state.autoCurrentInstanceQuest then
+    return nil, "disabled"
+  end
+
+  if not IsInInstance then
+    return nil, "missing_is_in_instance"
+  end
+
+  local ok, inInstance, instanceType = pcall(IsInInstance)
+  if not ok then
+    return nil, "is_in_instance_failed"
+  end
+
+  if not inInstance then
+    return nil, "not_in_instance"
+  end
+
+  local names = {}
+  local function addName(value)
+    if type(value) == "string" and value ~= "" then
+      table.insert(names, value)
+    end
+  end
+
+  if GetInstanceInfo then
+    local infoOk, instanceName, infoInstanceType = pcall(GetInstanceInfo)
+    if infoOk then
+      addName(instanceName)
+      if (not instanceType or instanceType == "") and type(infoInstanceType) == "string" then
+        instanceType = infoInstanceType
+      end
+    end
+  end
+
+  if GetRealZoneText then
+    local zoneOk, zoneName = pcall(GetRealZoneText)
+    if zoneOk then
+      addName(zoneName)
+    end
+  end
+
+  if GetZoneText then
+    local zoneOk, zoneName = pcall(GetZoneText)
+    if zoneOk then
+      addName(zoneName)
+    end
+  end
+
+  if GetMinimapZoneText then
+    local zoneOk, zoneName = pcall(GetMinimapZoneText)
+    if zoneOk then
+      addName(zoneName)
+    end
+  end
+
+  local target = Core.buildCurrentInstanceTarget({
+      instanceType = instanceType,
+      name = names[1],
+      names = names,
+    })
+
+  if not target then
+    return nil, "unsupported_instance_type:" .. tostring(instanceType)
+  end
+
+  return target
+end
+
+function AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget(source)
+  local target, reason = AutoCallboardRuntime.GetCurrentInstanceQuestTarget()
+  AutoCallboardRuntime.currentInstanceQuestTarget = target
+  AutoCallboardRuntime.currentInstanceQuestReason = reason
+
+  local signature
+  if target then
+    signature = tostring(target.questType) .. ":" .. tostring(target.name) .. ":" .. table.concat(target.aliases or {}, ",")
+  else
+    signature = "none:" .. tostring(reason)
+  end
+
+  if AutoCallboardRuntime.currentInstanceQuestSignature ~= signature then
+    AutoCallboardRuntime.currentInstanceQuestSignature = signature
+    if target then
+      AppendDebugLog("instance", "target source=" .. tostring(source) .. " type=" .. GetQuestTypeName(target.questType) .. " name=" .. tostring(target.name) .. " aliases=" .. table.concat(target.aliases or {}, ", "))
+    elseif state and state.autoCurrentInstanceQuest then
+      AppendDebugLog("instance", "target unavailable source=" .. tostring(source) .. " reason=" .. tostring(reason))
+    end
+  end
+
+  return target
+end
+
 function AutoCallboardRuntime.SyncOverlayFrameLevels()
   local referenceFrame = _G and _G.ObjectivesMainFrame or nil
   local referenceLevel = 20
@@ -4657,6 +4787,7 @@ UpdateQuestWindow = function()
   UpdateRollToggleButtonState(AutoCallboardRuntime.startRollButton, service ~= nil)
   UpdateRollToggleButtonState(controlFrame and controlFrame.startButton or nil, true)
   AutoCallboardRuntime.UpdateAutoAcceptSharedControl()
+  AutoCallboardRuntime.UpdateAutoCurrentInstanceControl()
 
   if questStatusText then
     local summonSummary = ""
@@ -5008,6 +5139,30 @@ function AutoCallboardRuntime.CreateQuestWindow()
   currentHeader:SetPoint("TOPLEFT", questWindow, "TOPLEFT", 24, -52)
   currentHeader:SetText("Current Callboard Quests")
   SkinHeadingText(currentHeader)
+
+  AutoCallboardRuntime.autoCurrentInstanceCheckbox = CreateFrame("CheckButton", nil, questWindow)
+  AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetPoint("TOPRIGHT", questWindow, "TOPRIGHT", -24, -52)
+  SkinCheckbox(AutoCallboardRuntime.autoCurrentInstanceCheckbox)
+  AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnClick", function(self)
+    AutoCallboardRuntime.SetField("autoCurrentInstanceQuest", self:GetChecked() and true or false)
+    end)
+  AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnEnter", function(self)
+    SetCheckboxVisual(self, "hover")
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine("Auto Current Instance")
+    GameTooltip:AddLine("Inside a dungeon or raid, Start rolls for that instance's matching Callboard quest.", 1, 1, 1)
+    GameTooltip:Show()
+    end)
+  AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnLeave", function(self)
+    SetCheckboxVisual(self)
+    GameTooltip:Hide()
+    end)
+
+  local autoCurrentInstanceLabel = questWindow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  autoCurrentInstanceLabel:SetPoint("RIGHT", AutoCallboardRuntime.autoCurrentInstanceCheckbox, "LEFT", -8, 0)
+  autoCurrentInstanceLabel:SetText("Auto Current Instance")
+  SkinMutedText(autoCurrentInstanceLabel)
+  AutoCallboardRuntime.UpdateAutoCurrentInstanceControl()
 
   for i = 1, 3 do
     currentQuestRows[i] = MakeQuestRow(questWindow, i, CURRENT_QUEST_ROW_WIDTH, true)
@@ -5689,6 +5844,10 @@ function AutoCallboardRuntime.SetField(field, value)
     Print("Quest auto-accept is " .. (value and "on" or "off") .. ".")
   elseif field == "autoAcceptShared" then
     Print("Auto Accept Quests is " .. (value and "on" or "off") .. ".")
+  elseif field == "autoCurrentInstanceQuest" then
+    AutoCallboardRuntime.currentInstanceQuestSignature = nil
+    AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget("setting")
+    Print("Auto Current Instance is " .. (value and "on" or "off") .. ".")
   elseif field == "autoSelect" then
     Print("Quest auto-select is " .. (value and "on" or "off") .. ".")
   elseif field == "maxRerolls" then
