@@ -844,7 +844,7 @@ local function GetHelpText()
   local lines = {
     "1. Begin in " .. HelpName("Quests") .. ".",
     "   Tick the box beside every quest you want the addon to hunt for.",
-    "   Anything ticked is treated as a wanted quest.",
+    "   Anything ticked is treated as a wanted quest unless Auto Current Instance is active inside a dungeon or raid.",
     "",
     "2. A new install starts with a small list.",
     "   Every quest that appears on the board gets recorded automatically.",
@@ -874,7 +874,7 @@ local function GetHelpText()
     "",
     "- " .. HelpName("Callboard") .. ": opens a nearby board, or casts the summon.",
     "- " .. HelpName("Start") .. ": kicks off rolling; asks first if no wanted quest is selected.",
-    "- " .. HelpName("Auto Current Instance") .. ": inside a dungeon or raid, rolls for that instance's board quest.",
+    "- " .. HelpName("Auto Current Instance") .. ": inside a dungeon or raid, rolls only for that instance's board quest.",
     "- " .. HelpName("Share") .. ": pushes your most recently accepted quest again.",
     "- Accepted quest chat output includes the gold spent to land that quest.",
     "- " .. HelpName("Auto Accept Quests") .. ": accepts quests shared by party or raid members.",
@@ -1688,6 +1688,27 @@ function AutoCallboardRuntime.ConfirmUntargetedRoll()
   StaticPopup_Show("AUTOCALLBOARD_CONFIRM_UNTARGETED_ROLL")
 end
 
+function AutoCallboardRuntime.ShowAutoCurrentInstanceWarning()
+  local message = Core.autoCurrentInstanceWarningText()
+
+  if not StaticPopupDialogs or not StaticPopup_Show then
+    Print(message)
+    return
+  end
+
+  StaticPopupDialogs.AUTOCALLBOARD_AUTO_CURRENT_INSTANCE_WARNING = StaticPopupDialogs.AUTOCALLBOARD_AUTO_CURRENT_INSTANCE_WARNING or {
+    text = message,
+    button1 = "Okay",
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+  }
+
+  StaticPopupDialogs.AUTOCALLBOARD_AUTO_CURRENT_INSTANCE_WARNING.text = message
+  StaticPopup_Show("AUTOCALLBOARD_AUTO_CURRENT_INSTANCE_WARNING")
+end
+
 local function RequireActiveCallboard(action)
   local access = AutoCallboardRuntime.GetBoardAccessState(action)
 
@@ -2414,11 +2435,7 @@ EvaluateCurrentObjectives = function()
 
   local objectives = CaptureCurrentObjectives()
   local currentInstanceTarget = AutoCallboardRuntime.RefreshCurrentInstanceQuestTarget("evaluate")
-  local match = Core.findCurrentInstanceObjective(objectives, currentInstanceTarget)
-
-  if not match then
-    match = Core.findDesiredObjective(objectives, state.desiredQuests)
-  end
+  local match = Core.findRollObjective(objectives, state.desiredQuests, currentInstanceTarget)
 
   if match then
     HandleMatch(match)
@@ -5144,13 +5161,17 @@ function AutoCallboardRuntime.CreateQuestWindow()
   AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetPoint("TOPRIGHT", questWindow, "TOPRIGHT", -24, -52)
   SkinCheckbox(AutoCallboardRuntime.autoCurrentInstanceCheckbox)
   AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnClick", function(self)
-    AutoCallboardRuntime.SetField("autoCurrentInstanceQuest", self:GetChecked() and true or false)
+    local enabled = self:GetChecked() and true or false
+    AutoCallboardRuntime.SetField("autoCurrentInstanceQuest", enabled)
+    if enabled then
+      AutoCallboardRuntime.ShowAutoCurrentInstanceWarning()
+    end
     end)
   AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnEnter", function(self)
     SetCheckboxVisual(self, "hover")
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     GameTooltip:AddLine("Auto Current Instance")
-    GameTooltip:AddLine("Inside a dungeon or raid, Start rolls for that instance's matching Callboard quest.", 1, 1, 1)
+    GameTooltip:AddLine("Inside a dungeon or raid, Start ignores checked quests and rolls only for that instance.", 1, 1, 1)
     GameTooltip:Show()
     end)
   AutoCallboardRuntime.autoCurrentInstanceCheckbox:SetScript("OnLeave", function(self)
@@ -5509,18 +5530,32 @@ local function CreateMinimapButton()
   end
 
   minimapButton = CreateFrame("Button", "AutoCallboardMinimapButton", Minimap or UIParent)
-  minimapButton:SetWidth(32)
-  minimapButton:SetHeight(32)
+  minimapButton:SetWidth(20)
+  minimapButton:SetHeight(20)
   minimapButton:SetFrameStrata("MEDIUM")
   minimapButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
   minimapButton:RegisterForDrag("LeftButton")
   minimapButton:SetMovable(true)
-  SkinButton(minimapButton)
+  StripButtonChrome(minimapButton)
+  if minimapButton.SetBackdrop then
+    minimapButton:SetBackdrop({
+      bgFile = WHITE8X8,
+      edgeFile = WHITE8X8,
+      edgeSize = 1,
+    })
+    ApplyColor(minimapButton, "SetBackdropColor", THEME.checkbox)
+    ApplyColor(minimapButton, "SetBackdropBorderColor", THEME.heading)
+  end
 
   minimapText = minimapButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  minimapText:SetWidth(18)
+  minimapText:SetHeight(18)
   minimapText:SetPoint("CENTER", minimapButton, "CENTER", 0, 0)
+  minimapText:SetJustifyH("CENTER")
+  minimapText:SetJustifyV("MIDDLE")
   minimapText:SetText("ACB")
-  minimapText:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
+  minimapText:SetFont(BUTTON_FONT, 7)
+  minimapText:SetTextColor(THEME.heading[1], THEME.heading[2], THEME.heading[3], THEME.heading[4] or 1)
 
   minimapButton:SetScript("OnDragStart", function()
     minimapButton:SetScript("OnUpdate", UpdateMinimapDragPosition)
@@ -5552,7 +5587,7 @@ local function CreateMinimapButton()
     end
     end)
   minimapButton:SetScript("OnEnter", function(self)
-    SetButtonVisual(self, "hover")
+    ApplyColor(self, "SetBackdropBorderColor", THEME.buttonHoverBorder)
     GameTooltip:SetOwner(self, "ANCHOR_LEFT")
     GameTooltip:AddLine("AutoCallboard")
     GameTooltip:AddLine("Left-click: show or hide controls.", 1, 1, 1)
@@ -5561,7 +5596,8 @@ local function CreateMinimapButton()
     GameTooltip:Show()
     end)
   minimapButton:SetScript("OnLeave", function(self)
-    SetButtonVisual(self)
+    ApplyColor(self, "SetBackdropColor", THEME.checkbox)
+    ApplyColor(self, "SetBackdropBorderColor", THEME.heading)
     GameTooltip:Hide()
     end)
 

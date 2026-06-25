@@ -43,6 +43,8 @@ local DEFAULTS = {
     },
 }
 
+local AUTO_CURRENT_INSTANCE_WARNING_TEXT = "Not all dungeons and raids have an AutoCallboard quest. If no matching quest exists, AutoCallboard will keep rolling until it reaches your limit or you stop it."
+
 local function trim(value)
     if type(value) ~= "string" then
         return ""
@@ -241,6 +243,10 @@ end
 
 function Core.defaultState()
     return copyDefaults()
+end
+
+function Core.autoCurrentInstanceWarningText()
+    return AUTO_CURRENT_INSTANCE_WARNING_TEXT
 end
 
 function Core.mergeState(saved)
@@ -1534,6 +1540,14 @@ function Core.findDesiredObjective(objectives, desired)
     end
 
     return nil
+end
+
+function Core.findRollObjective(objectives, desired, currentInstanceTarget)
+    if Core.buildCurrentInstanceTarget(currentInstanceTarget) then
+        return Core.findCurrentInstanceObjective(objectives, currentInstanceTarget)
+    end
+
+    return Core.findDesiredObjective(objectives, desired)
 end
 
 AutoCallboardCore = Core
